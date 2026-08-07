@@ -1,0 +1,6 @@
+/target
+/.keys
+*.key
+*.pub
+node_modules
+.DS_Store

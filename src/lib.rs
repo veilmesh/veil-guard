@@ -1,0 +1,14 @@
+//! veil-guard — web asset integrity and attestation.
+//!
+//! The wire protocol is defined by `SPEC.md` in the repository root, which is
+//! normative: where this crate and that document disagree, this crate is wrong.
+//! `tests/conformance.rs` checks both against the shared golden vectors in
+//! `testdata/conformance_vectors.json`, which the JavaScript reference verifier
+//! in `testdata/verify_vectors.mjs` also consumes.
+
+pub mod crypto;
+pub mod generators;
+pub mod html;
+pub mod manifest;
+pub mod paths;
+pub mod scanner;

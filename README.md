@@ -1,93 +1,121 @@
 # veil-guard
 
+> **Zero-Trust Web Asset Integrity & Attestation Suite for Modern SPAs and WebAssembly**
 
+`veil-guard` brings iOS/Android App Store-style code signing guarantees to Single Page Applications (SPAs), WebAssembly modules, and privacy-focused web applications — without blockchains, heavy browser extensions, or vendor lock-in.
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 🛡️ Honest Threat Model & Security Boundaries
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+`veil-guard` establishes an explicit, audited threat model. It differentiates between **Subresource / CDN Tampering** (handled via SRI & Service Worker) and **Origin Server Compromise** (handled via Out-of-Band CLI Audit, Rekor Transparency, or Extension).
 
-## Add your files
+| Attack Scenario | Threat Level | Tier 0 (CLI / SRI / CSP / Rekor) | Tier 1 (Service Worker) | Tier 2 (Extension) |
+| :--- | :---: | :---: | :---: | :---: |
+| **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked | ✅ Blocked |
+| **Dynamic Lazy Route / Wasm Chunk Tampering** (import()) | High | ⚠️ Requires SW / Import Map | ✅ Blocked via SW | ✅ Blocked |
+| **Post-First-Visit External Script Injection** | High | ⚠️ Partial (CSP) | ✅ Blocked via SW | ✅ Blocked |
+| **Post-First-Visit Inline Script Injection** | High | ✅ Blocked via CSP Hash / Nonce | ❌ Unseen by SW `fetch` | ✅ Blocked |
+| **Accidental / Corrupted Deploy** | Medium | ✅ Blocked via SRI | ✅ Blocked via SW | ✅ Blocked |
+| **Initial Origin Compromise** (Evil HTML served on 1st visit) | Critical | ⚠️ Detectable via Out-of-Band CLI Audit | ❌ (SW not installed) | ✅ Blocked |
+| **Origin Compromise via Evil `sw.js` Replacement** | Critical | ⚠️ Detectable via Out-of-Band CLI Audit | ❌ (SW replaced) | ✅ Blocked |
+| **Signer Private Key Misuse / Theft** | Critical | ⚠️ Detectable via Rekor & Keyless OIDC | ⚠️ Detectable | ⚠️ Detectable |
+| **Targeted Malicious Delivery** (Selective bad bundle) | Critical | ⚠️ Detectable via Multi-Region `veil-guard diff` | ❌ | ⚠️ Detectable |
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+> **Prior Art Acknowledgments:** `veil-guard` draws architectural inspiration from **Meta Code Verify** (WhatsApp Web / Cloudflare) and **WEBCAT** (Freedom of the Press Foundation).
+
+---
+
+## 🏗️ Architectural Overview
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/veilmeshgroup/veil-guard.git
-git branch -M main
-git push -uf origin main
++------------------------------------------------------------------------------------+
+|                         TIER 0: Build-Time & CLI Engine                            |
+|                                                                                    |
+|  Rust CLI (veil-guard-cli):                                                        |
+|  1. NFC Unicode & Path Normalization (macOS NFD -> NFC, Windows '\' -> '/')        |
+|  2. Binary Hashing: SHA-256 (Manifest/CSP) & SHA-384 (SRI)                         |
+|  3. Monotonic Build Unix-Timestamp Versioning & Expiry                             |
+|  4. Key Rotation & Revocation: Chain-of-Trust signed statements                    |
+|  5. Dual Signing: Ed25519 (verify_strict) AND ECDSA P-256 (WebCrypto)              |
+|  6. Multi-Page HTML SRI Injection & Per-Page CSP Hash Generators                   |
+|  7. Config Generators: Integrity-Policy & Server Headers (Nginx/Caddy/Netlify)     |
+|  8. Out-of-Band Remote Auditor & Multi-Region Diff Engine                          |
++------------------------------------------------------------------------------------+
+                                          |
+                                          v
++------------------------------------------------------------------------------------+
+|                      TIER 1: Browser Service Worker Runtime                        |
+|                                                                                    |
+|  Service Worker Runtime (veil-guard-sw.js):                                        |
+|  1. Key & Version Chain-of-Trust Pinning in IndexedDB                              |
+|  2. Binary ArrayBuffer Signature Validation (ECDSA P-256 / Ed25519 WebCrypto)      |
+|  3. Cache Storage Strategy: Verify -> Cache by SHA-256 -> Serve                     |
+|  4. Scope-Restricted Subresource Enforcement for Dynamic import() & WASM Chunks    |
++------------------------------------------------------------------------------------+
+                                          |
+                                          v
++------------------------------------------------------------------------------------+
+|                      TIER 2: Out-of-Band Browser Extension                         |
++------------------------------------------------------------------------------------+
 ```
 
-## Integrate with your tools
+---
 
-* [Set up project integrations](https://gitlab.com/veilmeshgroup/veil-guard/-/settings/integrations)
+## 🚀 Quickstart
 
-## Collaborate with your team
+### 1. Installation
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```bash
+cargo install --path .
+```
 
-## Test and Deploy
+### 2. Generate Keypair (2-of-3 Threshold)
 
-Use the built-in continuous integration in GitLab.
+```bash
+veil-guard keygen --out-dir .keys
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+### 3. Sign Web Build Directory
 
-***
+```bash
+veil-guard sign --dist ./dist --key-file .keys/veil-guard.key
+```
 
-# Editing this README
+### 4. Verify Local Build
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+veil-guard verify --dist ./dist --pubkey-file .keys/veil-guard.pub
+```
 
-## Suggestions for a good README
+### 5. Run Out-of-Band Remote Audit
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+veil-guard audit --url https://app.veilmesh.com --pubkey-file .keys/veil-guard.pub
+```
 
-## Name
-Choose a self-explaining name for your project.
+---
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## 📄 Protocol Specification
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+See [`SPEC.md`](./SPEC.md) for the normative specification of binary containers (`VGSIG1`), domain separation prefixes (RFC 6962), WebCrypto key encodings, verifier state machines, and path canonicalization rules.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+---
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## 🧪 Testing & Conformance
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+`veil-guard` features a frozen cross-language test vector suite:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+```bash
+# Run Rust test suite
+cargo test
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# Run JS WebCrypto verifier against conformance vectors
+node testdata/verify_vectors.mjs
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+---
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## 📜 License
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE).
