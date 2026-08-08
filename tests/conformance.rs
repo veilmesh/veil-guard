@@ -294,6 +294,34 @@ fn nfc_normalization() {
     assert_eq!(request_key(&nfd).as_deref(), Some(nfc.as_str()));
 }
 
+/// Regression, found by running Tier 1 in a browser: `/` was treated as an illegal
+/// path, so the worker blocked the home page of the site it was protecting.
+#[test]
+fn directory_style_urls_are_legal() {
+    assert_eq!(request_key("/").as_deref(), Some("/"));
+    assert_eq!(request_key("/blog/").as_deref(), Some("/blog/"));
+    assert_eq!(request_key("/a/b/").as_deref(), Some("/a/b/"));
+
+    // An interior empty component is still illegal — a server may collapse it and
+    // serve something the manifest never described.
+    assert!(request_key("/a//b.js").is_none());
+    assert!(request_key("//a.js").is_none());
+
+    assert_eq!(index_alias("/").as_deref(), Some("/index.html"));
+    assert_eq!(index_alias("/blog/").as_deref(), Some("/blog/index.html"));
+    assert_eq!(index_alias("/a.js"), None);
+}
+
+#[test]
+fn scanned_paths_never_end_in_a_slash() {
+    // A directory URL is a legal *request*, but a manifest lists files.
+    assert!(manifest_key_from_relative("assets/").is_none());
+    assert_eq!(
+        manifest_key_from_relative("assets/app.js").as_deref(),
+        Some("/assets/app.js")
+    );
+}
+
 #[test]
 fn path_rejections() {
     let v = vectors();

@@ -57,15 +57,31 @@ pub fn request_key(raw_pathname: &str) -> Option<String> {
     if !normalized.starts_with('/') {
         return None;
     }
-    for (i, component) in normalized.split('/').enumerate() {
+    // A trailing slash is a directory-style URL — `/` and `/blog/` are ordinary,
+    // legal paths that every static site serves. Only an *interior* empty
+    // component is illegal, and the `//` check above already rejects that.
+    let components: Vec<&str> = normalized.split('/').collect();
+    for (i, component) in components.iter().enumerate() {
         if i == 0 {
             continue; // the empty string before the leading slash
         }
-        if component.is_empty() || component == "." || component == ".." {
+        if *component == "." || *component == ".." {
+            return None;
+        }
+        if component.is_empty() && i != components.len() - 1 {
             return None;
         }
     }
     Some(normalized)
+}
+
+/// Resolve a request key to the manifest path that serves it.
+///
+/// A directory-style URL is served from its index document by essentially every
+/// static host, and a manifest lists files, so `/blog/` has to be looked up as
+/// `/blog/index.html`.
+pub fn index_alias(key: &str) -> Option<String> {
+    key.ends_with('/').then(|| format!("{key}index.html"))
 }
 
 /// Percent-decoding that fails closed: invalid escapes and non-UTF-8 results are

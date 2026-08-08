@@ -369,6 +369,21 @@ A verifier turns a request URL into a manifest key as follows:
 3. Percent-decode the remainder, then normalize to NFC.
 4. Compare bytewise against `assets[].path`. Comparison is **case-sensitive**.
 
+> **Implementation note — what a URL parser has already done.** A verifier working
+> from a WHATWG `URL` does not see the raw pathname. That parser resolves
+> percent-encoded dot segments before anything else runs: `/a/%2e%2e/secret.js`
+> arrives as `/secret.js`. This is not a gap, because the browser puts that same
+> resolved path on the wire, so the verifier and the origin server agree on which
+> resource is being requested; the resolved path is then an ordinary lookup, and it
+> is refused if nothing signed it. Encoded **separators** are the opposite case —
+> `%2F` and `%5C` survive parsing untouched, and a server may still decode them
+> into path structure the verifier never saw. Those are the ones step 2 exists for,
+> and rejecting them is not optional.
+>
+> A verifier that works from a raw string instead — the CLI auditor reading an
+> `href` out of served markup, for instance — gets no such normalization and must
+> apply every rule above itself.
+
 ### 7.2 Redirects
 
 Sub-resource fetches issued by the verifier **MUST** use `redirect: "error"`. A server

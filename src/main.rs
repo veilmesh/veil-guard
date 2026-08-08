@@ -76,9 +76,32 @@ enum Commands {
         /// Directory to write server header snippets into
         #[arg(long)]
         headers_out: Option<PathBuf>,
+        /// Emit an enforcing Integrity-Policy instead of report-only. Flip this
+        /// only once `veil-guard audit` reports no missing-integrity findings.
+        #[arg(long)]
+        enforce_headers: bool,
         /// Recorded in the manifest as a claim by the signer, not as proof
         #[arg(long)]
         source_commit: Option<String>,
+        /// Path prefix the Service Worker must leave alone; repeat per prefix.
+        ///
+        /// Everything same-origin is an allowlist, so any path the app requests
+        /// that is not a signed file is refused. Dynamic endpoints have no file to
+        /// sign, and so must be carved out here: `--exclude /api/`.
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
+    },
+
+    /// Emit the Tier 1 runtime with a trust root baked in
+    ///
+    /// Writes a self-contained Service Worker and the page-side loader. Run this
+    /// into the directory your build tool copies verbatim (`public/` for Vite), so
+    /// that the worker ends up at the site root and can claim the whole scope.
+    Runtime {
+        #[arg(long)]
+        trust_root: PathBuf,
+        #[arg(short, long, default_value = "public")]
+        out: PathBuf,
     },
 
     /// Check a build directory against its signed manifest
@@ -92,6 +115,50 @@ enum Commands {
         /// Reject a manifest older than this version
         #[arg(long, default_value_t = 0)]
         pinned_version: u64,
+    },
+
+    /// Audit a live deployment from outside it
+    ///
+    /// The trust root is read from a local file and never from the audited site;
+    /// that is the whole point of this command.
+    #[cfg(feature = "audit")]
+    Audit {
+        /// Base URL of the deployment, e.g. https://app.example.com
+        #[arg(short, long)]
+        url: String,
+        /// Local trust root. Must have reached this machine out of band.
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// Vantage-point label recorded in the snapshot, e.g. `eu-west`
+        #[arg(long)]
+        label: Option<String>,
+        /// Reject a manifest older than this version
+        #[arg(long, default_value_t = 0)]
+        pinned_version: u64,
+        /// Only walk the served HTML graph; do not re-download every asset
+        #[arg(long)]
+        graph_only: bool,
+        /// Lowest severity that makes the command exit non-zero
+        #[arg(long, default_value = "warning", value_parser = ["critical", "warning", "info"])]
+        fail_on: String,
+        /// Write the snapshot here, for later `veil-guard diff`
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Print the snapshot as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare two audit snapshots
+    ///
+    /// Divergence between vantage points is the only signal that reveals a bundle
+    /// served to some visitors and not others.
+    #[cfg(feature = "audit")]
+    Diff {
+        left: PathBuf,
+        right: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 
     /// Produce a rotation statement moving the pin from one trust root to another
@@ -266,7 +333,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             not_after_days,
             no_sri,
             headers_out,
+            enforce_headers,
             source_commit,
+            excludes,
         } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
@@ -346,7 +415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sigalgs: root.sigalgs.clone(),
                 trust_root_id: root.id_hex()?,
                 trust_root: root.clone(),
-                scope: Scope { include: vec!["/".into()], exclude: vec![] },
+                scope: Scope { include: vec!["/".into()], exclude: excludes.clone() },
                 source: serde_json::json!({
                     "commit": source_commit.unwrap_or_default(),
                     "toolchain": { "veil_guard": env!("CARGO_PKG_VERSION") },
@@ -391,15 +460,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("version      {version}");
             println!("trust root   {}  ({}-of-{})", manifest.trust_root_id, root.threshold, root.keys.len());
             println!("signers      {}", keys.len());
+            if excludes.is_empty() {
+                println!(
+                    "\nScope is the whole origin, so the worker refuses every same-origin request\n\
+                     that is not a signed file. If this app calls its own backend, carve those\n\
+                     paths out — for example `--exclude /api/` — or those calls will be blocked."
+                );
+            } else {
+                println!("excluded     {}", excludes.join(", "));
+            }
 
             if let Some(dir) = headers_out {
                 fs::create_dir_all(&dir)?;
                 use veil_guard::generators::{headers_caddy, headers_netlify, headers_nginx};
-                fs::write(dir.join("_headers"), headers_netlify(&pages, false))?;
-                fs::write(dir.join("veil-guard.nginx.conf"), headers_nginx(&pages, false))?;
-                fs::write(dir.join("veil-guard.Caddyfile"), headers_caddy(&pages, false))?;
-                println!("headers      {} (report-only; flip to enforcing once clean)", dir.display());
+                fs::write(dir.join("_headers"), headers_netlify(&pages, enforce_headers))?;
+                fs::write(dir.join("veil-guard.nginx.conf"), headers_nginx(&pages, enforce_headers))?;
+                fs::write(dir.join("veil-guard.Caddyfile"), headers_caddy(&pages, enforce_headers))?;
+                let mode = if enforce_headers {
+                    "enforcing"
+                } else {
+                    "report-only; add --enforce-headers once `audit` is clean"
+                };
+                println!("headers      {} ({mode})", dir.display());
             }
+        }
+
+        Commands::Runtime { trust_root, out } => {
+            let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
+            root.validate()?;
+            fs::create_dir_all(&out)?;
+
+            let sw = veil_guard::runtime::bundle_service_worker(&root)?;
+            let sw_path = out.join("veil-guard-sw.js");
+            let loader_path = out.join("veil-guard-loader.js");
+            fs::write(&sw_path, &sw)?;
+            fs::write(&loader_path, veil_guard::runtime::LOADER_JS)?;
+
+            println!("worker       {}  ({} KiB)", sw_path.display(), sw.len() / 1024);
+            println!("loader       {}", loader_path.display());
+            println!("trust root   {}  ({}-of-{})", root.id_hex()?, root.threshold, root.keys.len());
+            println!(
+                "\nAdd to every page, ideally as the first script:\n  \
+                 <script src=\"/veil-guard-loader.js\"></script>\n\n\
+                 The worker must be served from the site root with a `Service-Worker-Allowed`\n\
+                 scope of `/`, or it cannot see requests outside its own directory."
+            );
         }
 
         Commands::Verify { dist, trust_root, pinned_version } => {
@@ -456,6 +561,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     unmanifested.len()
                 )
                 .into());
+            }
+        }
+
+        #[cfg(feature = "audit")]
+        Commands::Audit { url, trust_root, label, pinned_version, graph_only, fail_on, out, json } => {
+            use veil_guard::auditor::{audit, AuditOptions, Severity};
+
+            let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
+            root.validate()?;
+
+            let snapshot = audit(
+                &url,
+                &root,
+                &AuditOptions {
+                    label,
+                    pinned_version,
+                    graph_only,
+                    ..Default::default()
+                },
+            )?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("url          {}", snapshot.url);
+                if let Some(l) = &snapshot.label {
+                    println!("vantage      {l}");
+                }
+                println!("trust root   {}  (local file, not fetched)", snapshot.trust_root_id);
+                println!("manifest     {}", snapshot.manifest_state);
+                if let Some(v) = snapshot.manifest_version {
+                    println!("version      {v}");
+                }
+                if let Some(h) = &snapshot.manifest_sha256 {
+                    println!("payload      sha256:{h}");
+                }
+                println!(
+                    "assets       {} in manifest, {} probed",
+                    snapshot.assets_in_manifest, snapshot.assets_probed
+                );
+
+                if snapshot.findings.is_empty() {
+                    println!("\nno findings");
+                } else {
+                    println!();
+                    for f in &snapshot.findings {
+                        let tag = match f.severity {
+                            Severity::Critical => "CRITICAL",
+                            Severity::Warning => "WARNING ",
+                            Severity::Info => "INFO    ",
+                        };
+                        println!("  {tag} {:<28} {}", f.kind, f.subject);
+                        println!("           {}", f.detail);
+                    }
+                }
+                println!(
+                    "\nA single clean audit shows this deployment matches what was signed.\n\
+                     It cannot show the same bundle is served to everyone — compare snapshots\n\
+                     from several vantage points with `veil-guard diff` for that."
+                );
+            }
+
+            if let Some(path) = out {
+                fs::write(&path, serde_json::to_string_pretty(&snapshot)? + "\n")?;
+                if !json {
+                    println!("snapshot     {}", path.display());
+                }
+            }
+
+            let threshold = match fail_on.as_str() {
+                "critical" => Severity::Critical,
+                "info" => Severity::Info,
+                _ => Severity::Warning,
+            };
+            if !snapshot.is_clean_at(threshold) {
+                std::process::exit(1);
+            }
+        }
+
+        #[cfg(feature = "audit")]
+        Commands::Diff { left, right, json } => {
+            use veil_guard::auditor::{diff, Snapshot};
+
+            let a: Snapshot = serde_json::from_slice(&fs::read(&left)?)?;
+            let b: Snapshot = serde_json::from_slice(&fs::read(&right)?)?;
+            let divergences = diff(&a, &b);
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&divergences)?);
+            } else {
+                let name = |s: &Snapshot| {
+                    s.label.clone().unwrap_or_else(|| s.url.clone())
+                };
+                println!("left         {}  @{}", name(&a), a.observed_at);
+                println!("right        {}  @{}", name(&b), b.observed_at);
+
+                if divergences.is_empty() {
+                    println!("\nidentical: both vantage points were served the same bytes");
+                } else {
+                    println!("\n{} divergence(s):", divergences.len());
+                    for d in &divergences {
+                        println!("  {:<20} {}", d.kind, d.subject);
+                        println!("    left  {}", d.left);
+                        println!("    right {}", d.right);
+                    }
+                    println!(
+                        "\nIf both snapshots are of the same deployment at the same version,\n\
+                         divergence means different visitors are being served different code."
+                    );
+                }
+            }
+
+            if !divergences.is_empty() {
+                std::process::exit(1);
             }
         }
 

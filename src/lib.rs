@@ -6,9 +6,12 @@
 //! `testdata/conformance_vectors.json`, which the JavaScript reference verifier
 //! in `testdata/verify_vectors.mjs` also consumes.
 
+#[cfg(feature = "audit")]
+pub mod auditor;
 pub mod crypto;
 pub mod generators;
 pub mod html;
 pub mod manifest;
 pub mod paths;
+pub mod runtime;
 pub mod scanner;

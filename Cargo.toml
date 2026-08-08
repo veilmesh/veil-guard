@@ -26,8 +26,12 @@ walkdir = "2.5"
 hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 
+# Out-of-band auditor only. Blocking client on purpose: a CLI that probes a few
+# dozen URLs has no use for an async runtime.
+ureq = { version = "3.3", optional = true }
+
 [features]
 default = []
-# The out-of-band auditor (Step 3) pulls a large dependency tree. It is kept off the
-# default path so that the signing side stays small enough to review.
-audit = []
+# The auditor reaches the network, so it is kept off the default path: the signing
+# side stays small enough to review, and nothing that signs can also fetch.
+audit = ["dep:ureq"]
