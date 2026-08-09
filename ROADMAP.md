@@ -1,0 +1,266 @@
+# Полная Спецификация и Дорожная Карта Проекта `veil-guard`
+
+`veil-guard` — это Zero-Trust веб-комплекс аттестации и контроля целостности (Web Asset Integrity & Attestation Suite) для SPA, PWA и WebAssembly. Он приносит подписи уровня мобильных App Store / Google Play в веб-приложения без блокчейнов и тяжелых расширений.
+
+> [!NOTE]
+> Документ верифицирован на соответствие реальному исходному коду: [`manifest.rs`](src/manifest.rs), [`scanner.rs`](src/scanner.rs), [`main.rs`](src/main.rs), [`Cargo.toml`](Cargo.toml).
+
+---
+
+## 1. Визуализация Дорожной Карты (Roadmap Diagram)
+
+```mermaid
+flowchart TD
+    subgraph Phase1["🟢 Фаза 1: CI/CD & SLSA Provenance"]
+        P1_1["@veilmesh/veil-guard npm"] --> P1_2["vite-plugin-veil-guard"]
+        P1_2 --> P1_3["veilmesh/veil-guard-action"]
+        P1_3 --> P1_4["SLSA Provenance Embedding"]
+    end
+
+    subgraph Phase2["🔵 Фаза 2: ESM, Wasm & Streaming"]
+        P2_1["Native importmap + SRI (Chrome 111+)"] --> P2_2["veilGuardImport() Legacy Fallback"]
+        P2_2 --> P2_3["veil-guard-wasm-loader.js"]
+        P2_3 --> P2_4["TransformStream sha2-Wasm Chunked Hashing"]
+    end
+
+    subgraph Phase3["🟣 Фаза 3: Tier 2 Extension & Crypto Infrastructure"]
+        P3_1["Manifest V3 Browser Extension"] --> P3_2["AWS/GCP KMS & PKCS#11"]
+        P3_2 --> P3_3["Sigstore / Rekor Keyless"]
+        P3_3 --> P3_4["Third-Party Audit Relay"]
+    end
+
+    subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit"]
+        P4_1["W3C Integrity Violation Endpoint"] --> P4_2["veil-guard audit --daemon"]
+        P4_2 --> P4_3["SIEM / Datadog / PagerDuty"]
+    end
+
+    Phase1 --> Phase2 --> Phase3 --> Phase4
+```
+
+---
+
+## 2. Критические технические риски и способы их решения
+
+### ⚠️ Ограничения Manifest V3 в браузерах (Фаза 3)
+* **Проблема:** API `declarativeNetRequest` предназначен для блокировки или перенаправления URL по статическим правилам, но он **не имеет доступа к телу ответа** (response body). Вычислить SHA-256 от загруженного `.js` файла до его попадания в DOM через `declarativeNetRequest` невозможно.
+* **Решение:** Для расширения Tier 2 перехват первого визита реализуется через комбинированный подход:
+  1. Перехват главного `index.html` на уровне HTTP-заголовков через `webRequest` (в Firefox/Safari и Chrome Enterprise) или подмена ответа через Service Worker расширения.
+  2. Использование локального прокси-скрипта (**Injected Content Script**), который подменяет глобальный `document.write` / `appendChild` для `<script>` тегов до момента их исполнения, пока зарегистрированный `veil-guard-sw.js` не возьмет контроль на себя.
+
+### ⚠️ Потоковая проверка в Service Worker (Фаза 2)
+* **Проблема:** Браузерный API `crypto.subtle.digest('SHA-256', data)` не поддерживает потоковый ввод (Chunked Hashing) — он принимает только цельный `ArrayBuffer`.
+* **Решение:** Для потоковой проверки через `TransformStream`:
+  1. Компилировать нативную Rust-библиотеку **`sha2`** (уже используется в [`Cargo.toml`](Cargo.toml)) под `wasm32-unknown-unknown`, предоставляя методы `.update(chunk)` и `.finalize()`. Это единственный вариант без изменения SPEC.
+  2. Альтернатива: разбивать крупные файлы (Wasm / бинарные чанки) на фиксированные блоки (например, по 1 МБ) с генерацией дерева Меркла (**Merkle Tree**) или массива хэшей блоков в манифесте. Требует расширения формата [`AssetEntry`](src/manifest.rs#L58-L65) и версионного bump SPEC.
+
+  > [!WARNING]
+  > Добавление `blake3` как алгоритма хэширования — это не drop-in замена. Требует: (1) явной зависимости в `Cargo.toml`, (2) нового значения `sigalg` в SPEC, (3) обновления conformance vectors. Приоритет — сначала `sha2`-Wasm.
+
+### ⚠️ Динамические импорты и Code Splitting (Фаза 1 → 2)
+* **Проблема:** Автоматическое разбиение кода бандлерами (Vite/Webpack) создает взаимосвязанный граф ассетов. Изменение одного CSS-файла меняет хэши нескольких JS-чанков.
+* **Решение:** Плагин [`vite-plugin-veil-guard`]() подключается строго на этапе `closeBundle` (после того, как окончательный граф ассетов полностью сформирован и записан на диск), вызывая `veil-guard sign` против финального состояния директории `dist`. Результат — подписанный [`veil-guard-manifest.json`](src/main.rs#L495) и бинарный bundle подписей `veil-guard-manifest.sig`.
+
+### ⚠️ Нативный importmap vs. враппер `window.veilGuardImport()` (Фаза 2)
+* **Проблема:** Import Maps с атрибутом `integrity` — нативная функция браузера (Chrome 111+, Firefox 108+), а `window.veilGuardImport()` — кастомный JS-враппер. Смешение без четкой стратегии создает двойной путь верификации.
+* **Решение (стратегия приоритетов):**
+  1. **Приоритет 1 (современные браузеры):** Генерировать `<script type="importmap">` с атрибутами `integrity` напрямую. Браузер проверяет SRI нативно без JS.
+  2. **Приоритет 2 (legacy fallback):** `window.veilGuardImport(url)` перехватывает `import()` в среде, где `importmap integrity` не поддерживается, и проверяет хэш через Service Worker или Wasm-модуль.
+
+---
+
+## 3. Спецификация SLSA Provenance для манифеста `veil-guard` (Фаза 1)
+
+Для интеграции с фреймворком **SLSA** (Supply-chain Levels for Software Artifacts) в манифест `veil-guard` добавляется блок `source` (уже предусмотрен как `serde_json::Value` в [`Manifest`](src/manifest.rs#L88)), расширенный метаданными происхождения сборки.
+
+Файловая структура на диске после `veil-guard sign`:
+
+| Файл | Содержимое |
+|---|---|
+| `dist/veil-guard-manifest.json` | JSON-манифест со списком ассетов и метаданными |
+| `dist/veil-guard-manifest.sig` | Бинарный bundle подписей (`VGSIG1` формат, SPEC §5) |
+
+Корректная структура [`veil-guard-manifest.json`](src/main.rs#L495) с блоком SLSA provenance:
+
+```json
+{
+  "spec": "veil-guard/1",
+  "version": 1754726400,
+  "not_after": 1755331200,
+  "sigalgs": ["ed25519", "p256"],
+  "trust_root_id": "a1b2c3d4e5f6...",
+  "trust_root": { "...": "..." },
+  "scope": {
+    "include": ["/"],
+    "exclude": ["/api/"]
+  },
+  "source": {
+    "commit": "7a9b2c8e1d3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b",
+    "toolchain": { "veil_guard": "0.1.0" },
+    "slsa_provenance": {
+      "builder": {
+        "id": "https://github.com/veilmesh/veil-guard-action@v1"
+      },
+      "build_type": "https://slsa.dev/provenance/v1",
+      "invocation": {
+        "config_source": {
+          "uri": "git+https://github.com/example/fintech-spa",
+          "digest": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "entry_point": ".github/workflows/deploy.yml"
+        },
+        "environment": {
+          "github_run_id": "123456789",
+          "github_commit": "7a9b2c8e1d3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b"
+        }
+      }
+    }
+  },
+  "assets": [
+    {
+      "path": "/index.html",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha384": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+      "size": 2048,
+      "content_type": "text/html"
+    },
+    {
+      "path": "/assets/app.js",
+      "sha256": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+      "sha384": "59e1748777448c69de6b800d7a33bbfb9ff1b463e44354c3553bcdb9c666fa90125a3c79f90397bdf5f6a13de828684f",
+      "size": 512000,
+      "content_type": "text/javascript"
+    }
+  ]
+}
+```
+
+> [!IMPORTANT]
+> Блок `slsa_provenance` размещается **внутри существующего поля `source`** ([`Manifest.source: serde_json::Value`](src/manifest.rs#L88)), так как SPEC §12 разрешает дополнительные поля без версионного bump. Подписи хранятся в **отдельном** файле `veil-guard-manifest.sig` (бинарный `VGSIG1` bundle) и никогда не встраиваются в JSON.
+
+---
+
+## 4. Исправленный шаблон плагина `vite-plugin-veil-guard` (Фаза 1)
+
+```typescript
+// vite-plugin-veil-guard/src/index.ts
+import { Plugin } from 'vite';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
+
+export interface VeilGuardPluginOptions {
+  /** Путь к файлу приватного ключа (.key.json) */
+  keyPath: string | string[];
+  /** Путь к файлу trust root (обязательный аргумент CLI --trust-root) */
+  trustRootPath: string;
+  /** Пути-префиксы, которые SW должен пропускать без проверки (напр. /api/) */
+  exclude?: string[];
+  /** Директория для генерации заголовков Nginx/Caddy/Netlify */
+  headersOut?: string;
+  /** Записать origin-коммит в поле source.commit */
+  sourceCommit?: string;
+}
+
+export function veilGuardPlugin(options: VeilGuardPluginOptions): Plugin {
+  let resolvedOutDir = 'dist';
+
+  return {
+    name: 'vite-plugin-veil-guard',
+    apply: 'build',
+    configResolved(config) {
+      // Читаем финальный outDir после резолва всей конфигурации Vite
+      resolvedOutDir = config.build.outDir || 'dist';
+    },
+    async closeBundle() {
+      // closeBundle вызывается ПОСЛЕ того, как все файлы записаны на диск —
+      // только в этот момент граф ассетов стабилен и хэши финальны.
+      console.log('[veil-guard] Signing asset manifest...');
+      try {
+        const keys = Array.isArray(options.keyPath)
+          ? options.keyPath
+          : [options.keyPath];
+
+        const args: string[] = [
+          'sign',
+          '--dist', resolvedOutDir,
+          '--trust-root', options.trustRootPath,  // обязательный аргумент
+        ];
+
+        // Повторяем --key для каждого подписанта (k-of-n threshold)
+        for (const key of keys) {
+          args.push('--key', key);
+        }
+
+        if (options.exclude) {
+          for (const pattern of options.exclude) {
+            args.push('--exclude', pattern);
+          }
+        }
+
+        if (options.headersOut) {
+          args.push('--headers-out', options.headersOut);
+        }
+
+        if (options.sourceCommit) {
+          args.push('--source-commit', options.sourceCommit);
+        }
+
+        const { stdout } = await execFileAsync('veil-guard', args);
+        console.log(`[veil-guard] ✅ ${stdout.trim()}`);
+      } catch (error) {
+        console.error('[veil-guard] ❌ Build integrity signing failed:', error);
+        throw error; // прерываем сборку при ошибке подписи
+      }
+    }
+  };
+}
+```
+
+**Пример использования в `vite.config.ts`:**
+```typescript
+import { defineConfig } from 'vite';
+import { veilGuardPlugin } from 'vite-plugin-veil-guard';
+
+export default defineConfig({
+  plugins: [
+    veilGuardPlugin({
+      trustRootPath: './trust-root.json',
+      keyPath: ['.keys/alice.key.json', '.keys/bob.key.json'],  // 2-of-3
+      exclude: ['/api/', '/ws/'],
+      headersOut: './headers',
+      sourceCommit: process.env.GITHUB_SHA,
+    }),
+  ],
+});
+```
+
+---
+
+## 5. Полный 4-Фазный План Внедрения
+
+### 🟢 Фаза 1: CI/CD & SLSA Provenance
+- Выпуск npm-пакета `@veilmesh/veil-guard` (Node.js wrapper над CLI).
+- Реализация `vite-plugin-veil-guard` на хуке `closeBundle` с корректными CLI-аргументами (`--dist`, `--trust-root`, `--key`×N).
+- Релиз `veilmesh/veil-guard-action` для GitHub Actions с передачей `GITHUB_SHA` в `--source-commit`.
+- Расширение поля `source` в манифесте данными SLSA Provenance v1 (через `serde_json::Value`, без изменения SPEC).
+
+### 🔵 Фаза 2: Dynamic ESM, Wasm & Streaming
+- **Import Maps:** Генерация `<script type="importmap">` с атрибутами `integrity=sha384-...` как приоритетный путь (Chrome 111+, Firefox 108+).
+- **Legacy Fallback:** Враппер `window.veilGuardImport(url)` для браузеров без поддержки `importmap integrity`.
+- Аттестационный loader для WebAssembly (`veil-guard-wasm-loader.js`): перехват `WebAssembly.instantiateStreaming` с проверкой SHA-256 из манифеста.
+- Потоковая проверка: компиляция **`sha2`** (уже в `Cargo.toml`) под `wasm32-unknown-unknown` для Chunked Hashing в `TransformStream` Service Worker.
+
+### 🟣 Фаза 3: Tier 2 Extension, Cloud KMS & Rekor
+- Браузерное расширение Manifest V3 с двойным перехватом:
+  - Injected Content Script патчит `document.write` / `appendChild` до готовности SW.
+  - `webRequest` (Firefox/Safari/Chrome Enterprise) для перехвата заголовков.
+- Поддержка AWS KMS / GCP KMS и PKCS#11 (YubiKey) в CLI Rust.
+- Интеграция Sigstore / Fulcio (OIDC) с публикацией в лог прозрачности Rekor.
+- Third-Party Audit Relay: сверка манифеста через независимые узлы (по аналогии с Meta Code Verify + Cloudflare).
+
+### 🔴 Фаза 4: Telemetry & Multi-Region Audit
+- Нативная поддержка приема отчетов **W3C `IntegrityViolationReport`**.
+- Запуск `veil-guard audit --daemon` для непрерывного многорегионального мониторинга CDN 24/7.
+- Интеграция с SIEM, Datadog, Sentry и PagerDuty.
