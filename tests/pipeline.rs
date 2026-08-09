@@ -12,7 +12,8 @@ fn digests(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
-const D: &str = "aa00bb11cc22dd33ee44ff5566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677";
+const D: &str =
+    "aa00bb11cc22dd33ee44ff5566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677";
 
 // ------------------------------------------------------------------ html locator
 #[test]
@@ -30,7 +31,11 @@ fn finds_script_and_link_tags() {
 fn ignores_tags_inside_comments() {
     let html = br#"<head><!-- <script src="/evil.js"></script> --><link rel="stylesheet" href="/a.css"></head>"#;
     let tags = scan(html).unwrap();
-    assert_eq!(tags.len(), 1, "the commented-out script must not be reported");
+    assert_eq!(
+        tags.len(),
+        1,
+        "the commented-out script must not be reported"
+    );
     assert_eq!(tags[0].name, "link");
 }
 
@@ -124,7 +129,12 @@ fn targets_only_integrity_capable_subresources() {
 <script>inline()</script>
 </head>"#;
     let d = digests(&[
-        ("/favicon.svg", D), ("/a.css", D), ("/m.js", D), ("/p.js", D), ("/f.woff2", D), ("/a.js", D),
+        ("/favicon.svg", D),
+        ("/a.css", D),
+        ("/m.js", D),
+        ("/p.js", D),
+        ("/f.woff2", D),
+        ("/a.js", D),
     ]);
     let (_, report) = inject_sri(html, "/index.html", &d).unwrap();
     let keys: Vec<&str> = report.applied.iter().map(|(_, k)| k.as_str()).collect();
@@ -144,7 +154,8 @@ fn cross_origin_is_reported_not_rewritten() {
 
 #[test]
 fn relative_urls_resolve_against_the_page() {
-    let html = br#"<script src="../assets/app.js"></script><link rel="stylesheet" href="./local.css">"#;
+    let html =
+        br#"<script src="../assets/app.js"></script><link rel="stylesheet" href="./local.css">"#;
     let d = digests(&[("/assets/app.js", D), ("/blog/local.css", D)]);
     let (_, report) = inject_sri(html, "/blog/post.html", &d).unwrap();
     let keys: Vec<&str> = report.applied.iter().map(|(_, k)| k.as_str()).collect();
@@ -181,7 +192,12 @@ fn injection_is_a_pure_insertion() {
 <html><head><link rel="stylesheet" crossorigin="" href="/a.css">
 <script type="module" crossorigin="" src="/a.js"></script></head>
 <body><div id="app">hydrated content</div></body></html>"#;
-    let (out, _) = inject_sri(html, "/index.html", &digests(&[("/a.css", D), ("/a.js", D)])).unwrap();
+    let (out, _) = inject_sri(
+        html,
+        "/index.html",
+        &digests(&[("/a.css", D), ("/a.js", D)]),
+    )
+    .unwrap();
 
     let sri = sri_value(D).unwrap();
     let stripped = String::from_utf8(out)
@@ -203,8 +219,14 @@ fn inline_hashes_skip_data_blocks_and_empty_scripts() {
 <script src="/external.js"></script>
 <script>   </script>"#;
     let hashes = inline_script_hashes(html).unwrap();
-    assert_eq!(hashes.len(), 2, "ld+json, external and whitespace-only are excluded");
-    assert!(hashes.iter().all(|h| h.starts_with("'sha256-") && h.ends_with('\'')));
+    assert_eq!(
+        hashes.len(),
+        2,
+        "ld+json, external and whitespace-only are excluded"
+    );
+    assert!(hashes
+        .iter()
+        .all(|h| h.starts_with("'sha256-") && h.ends_with('\'')));
 }
 
 #[test]
@@ -232,8 +254,26 @@ fn base64_and_sri_encoding() {
 
 #[test]
 fn csp_directive_shape() {
-    let csp = csp_script_src(&["'sha256-abc'".into()]);
+    let csp = csp_script_src(&["'sha256-abc'".into()], &[]);
     assert_eq!(csp, "script-src 'self' 'sha256-abc'");
+}
+
+#[test]
+fn csp_extra_sources_are_appended_and_deduplicated() {
+    // A tag manager: the inline bootstrap is hashed from the built page, but the
+    // host it injects from appears nowhere in dist and has to be named.
+    let csp = csp_script_src(
+        &["'sha256-abc'".into()],
+        &[
+            "https://www.googletagmanager.com".into(),
+            "https://www.googletagmanager.com".into(),
+            "'self'".into(),
+        ],
+    );
+    assert_eq!(
+        csp,
+        "script-src 'self' 'sha256-abc' https://www.googletagmanager.com"
+    );
 }
 
 // ------------------------------------------------------------------ scanner
@@ -261,7 +301,11 @@ fn scan_normalizes_excludes_and_sorts() {
 
     let assets = scan_dist(&tmp).unwrap();
     let keys: Vec<&str> = assets.iter().map(|a| a.key.as_str()).collect();
-    assert_eq!(keys, vec!["/assets/app.js", "/index.html"], "sorted, residue excluded");
+    assert_eq!(
+        keys,
+        vec!["/assets/app.js", "/index.html"],
+        "sorted, residue excluded"
+    );
     assert!(assets[0].sha256.len() == 64 && assets[0].sha384.len() == 96);
 
     std::fs::remove_dir_all(&tmp).unwrap();

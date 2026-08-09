@@ -8,7 +8,10 @@ use veil_guard::manifest::*;
 use veil_guard::paths::*;
 
 fn vectors() -> Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/conformance_vectors.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/conformance_vectors.json"
+    );
     serde_json::from_slice(&std::fs::read(path).expect("vectors present")).expect("vectors parse")
 }
 
@@ -37,7 +40,10 @@ fn domain_prefixes_match_the_spec() {
 #[test]
 fn hex_decoding_is_strict() {
     assert!(unhex("00ff").is_ok());
-    assert!(unhex("00FF").is_err(), "uppercase must be rejected, not normalized");
+    assert!(
+        unhex("00FF").is_err(),
+        "uppercase must be rejected, not normalized"
+    );
     assert!(unhex("0f0").is_err(), "odd length must be rejected");
     assert!(unhex("zz").is_err());
 }
@@ -46,7 +52,12 @@ fn hex_decoding_is_strict() {
 #[test]
 fn key_id_derivation() {
     let v = vectors();
-    for (i, d) in v["derivations"]["key_id"].as_array().unwrap().iter().enumerate() {
+    for (i, d) in v["derivations"]["key_id"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
         let s = &v["signers"][i];
         let ed: [u8; 32] = h(&s["ed25519_public"]).try_into().unwrap();
         let p: [u8; 65] = h(&s["p256_public_sec1_uncompressed"]).try_into().unwrap();
@@ -65,7 +76,9 @@ fn trust_root_id_derivation() {
     root.validate().expect("fixture trust root is valid");
     assert_eq!(
         root.id_hex().unwrap(),
-        v["derivations"]["trust_root"]["expect_trust_root_id"].as_str().unwrap()
+        v["derivations"]["trust_root"]["expect_trust_root_id"]
+            .as_str()
+            .unwrap()
     );
 }
 
@@ -84,7 +97,10 @@ fn trust_root_validation_rules() {
 
     let mut unsorted = base.clone();
     unsorted.keys.reverse();
-    assert!(unsorted.validate().is_err(), "keys must be sorted by key_id");
+    assert!(
+        unsorted.validate().is_err(),
+        "keys must be sorted by key_id"
+    );
 
     let mut too_high = base.clone();
     too_high.threshold = (base.keys.len() + 1) as u8;
@@ -96,11 +112,17 @@ fn trust_root_validation_rules() {
 
     let mut forged = base.clone();
     forged.keys[0].key_id = "0000000000000000".into();
-    assert!(forged.validate().is_err(), "key_id must match its key material");
+    assert!(
+        forged.validate().is_err(),
+        "key_id must match its key material"
+    );
 
     let mut dup_alg = base.clone();
     dup_alg.sigalgs = vec![SigAlg::Ed25519, SigAlg::Ed25519];
-    assert!(dup_alg.validate().is_err(), "sigalgs must be sorted and unique");
+    assert!(
+        dup_alg.validate().is_err(),
+        "sigalgs must be sorted and unique"
+    );
 }
 
 // ------------------------------------------------------------------ SPEC §2.1
@@ -109,8 +131,14 @@ fn hashes_and_sri_match() {
     let v = vectors();
     for a in v["hashes"].as_array().unwrap() {
         let body = h(&a["body_hex"]);
-        assert_eq!(hex::encode(sha256(&body)), a["expect_sha256"].as_str().unwrap());
-        assert_eq!(hex::encode(sha384(&body)), a["expect_sha384"].as_str().unwrap());
+        assert_eq!(
+            hex::encode(sha256(&body)),
+            a["expect_sha256"].as_str().unwrap()
+        );
+        assert_eq!(
+            hex::encode(sha384(&body)),
+            a["expect_sha384"].as_str().unwrap()
+        );
     }
 }
 
@@ -122,7 +150,10 @@ fn p256_rejects_compressed_points_and_der_signatures() {
 
     let mut compressed = key.clone();
     compressed.p256 = format!("02{}", &key.p256[2..66]); // 0x02 prefix, 33 bytes worth
-    assert!(compressed.p256_bytes().is_err(), "compressed SEC1 must be rejected");
+    assert!(
+        compressed.p256_bytes().is_err(),
+        "compressed SEC1 must be rejected"
+    );
 
     // A DER-wrapped signature is 70-72 bytes; the raw r||s form is exactly 64.
     let der_ish = vec![0x30u8; 70];
@@ -147,7 +178,11 @@ fn bundle_round_trips() {
     let v = vectors();
     let bytes = h(&v["manifest"]["cases"][0]["bundle_hex"]);
     let entries = parse_bundle(&bytes).expect("valid bundle parses");
-    assert_eq!(build_bundle(&entries), bytes, "re-encoding must be byte-identical");
+    assert_eq!(
+        build_bundle(&entries),
+        bytes,
+        "re-encoding must be byte-identical"
+    );
 }
 
 #[test]
@@ -160,7 +195,9 @@ fn unknown_alg_id_is_skipped_not_rejected() {
         .find(|c| c["name"] == "unknown_alg_id_is_skipped")
         .expect("vector present");
     let entries = parse_bundle(&h(&case["bundle_hex"])).expect("parses despite unknown alg");
-    assert!(entries.iter().any(|e| SigAlg::from_alg_id(e.alg_id).is_none()));
+    assert!(entries
+        .iter()
+        .any(|e| SigAlg::from_alg_id(e.alg_id).is_none()));
 }
 
 // ------------------------------------------------------------------ SPEC §8.1
@@ -192,7 +229,11 @@ fn manifest_state_machine_matches_vectors() {
             now,
             SUPPORTED_ALGS,
         );
-        assert_eq!(got.as_str(), case["expect"].as_str().unwrap(), "case `{name}`");
+        assert_eq!(
+            got.as_str(),
+            case["expect"].as_str().unwrap(),
+            "case `{name}`"
+        );
     }
 }
 
@@ -214,17 +255,14 @@ fn restricted_algorithm_sets() {
     let payload = h(&v["manifest"]["payload_utf8_hex"]);
     let root = pinned_root(&v);
     let cases = v["manifest"]["cases"].as_array().unwrap();
-    let find = |n: &str| {
-        h(&cases.iter().find(|c| c["name"] == n).unwrap()["bundle_hex"])
-    };
+    let find = |n: &str| h(&cases.iter().find(|c| c["name"] == n).unwrap()["bundle_hex"]);
     let valid = find("valid_quorum");
     let stripped = find("stripped_p256_half");
     let now = v["manifest"]["now_valid"].as_u64().unwrap();
     let pv = v["manifest"]["pinned_version"].as_u64().unwrap();
 
-    let run = |bundle: &[u8], algs: &[SigAlg]| {
-        verify_manifest(&payload, bundle, &root, pv, now, algs)
-    };
+    let run =
+        |bundle: &[u8], algs: &[SigAlg]| verify_manifest(&payload, bundle, &root, pv, now, algs);
 
     assert_eq!(run(&valid, &[SigAlg::P256]), ManifestState::Valid);
     assert_eq!(run(&valid, &[SigAlg::Ed25519]), ManifestState::Valid);
@@ -236,7 +274,10 @@ fn restricted_algorithm_sets() {
         run(&stripped, &[SigAlg::Ed25519, SigAlg::P256]),
         ManifestState::UntrustedRoot
     );
-    assert_eq!(run(&stripped, &[SigAlg::P256]), ManifestState::UntrustedRoot);
+    assert_eq!(
+        run(&stripped, &[SigAlg::P256]),
+        ManifestState::UntrustedRoot
+    );
 
     // Documented and asserted so it can never become accidental: a verifier that
     // implements only ed25519 is protected only by ed25519.
@@ -256,7 +297,9 @@ fn rotation_matches_vectors() {
         RotationVerdict::Accept
     );
 
-    let replay_at = v["rotation"]["replay_pinned_rotation_version"].as_u64().unwrap();
+    let replay_at = v["rotation"]["replay_pinned_rotation_version"]
+        .as_u64()
+        .unwrap();
     assert_eq!(
         verify_rotation(&payload, &bundle, &root, replay_at, SUPPORTED_ALGS),
         RotationVerdict::Reject,
@@ -289,7 +332,11 @@ fn nfc_normalization() {
     let c = &v["paths"]["nfc"][0];
     let nfd = String::from_utf8(h(&c["input_nfd_hex"])).unwrap();
     let nfc = String::from_utf8(h(&c["expect_nfc_hex"])).unwrap();
-    assert_ne!(nfd.as_bytes(), nfc.as_bytes(), "the vector must actually differ");
+    assert_ne!(
+        nfd.as_bytes(),
+        nfc.as_bytes(),
+        "the vector must actually differ"
+    );
     assert_eq!(to_nfc(&nfd), nfc);
     assert_eq!(request_key(&nfd).as_deref(), Some(nfc.as_str()));
 }
@@ -339,7 +386,10 @@ fn manifest_lookup_finds_the_normalized_path() {
     let payload = h(&v["manifest"]["payload_utf8_hex"]);
     let m: Manifest = serde_json::from_slice(&payload).unwrap();
     let nfc = String::from_utf8(h(&v["paths"]["nfc"][0]["expect_nfc_hex"])).unwrap();
-    assert!(m.lookup(&nfc).is_some(), "binary search must find the NFC path");
+    assert!(
+        m.lookup(&nfc).is_some(),
+        "binary search must find the NFC path"
+    );
     assert!(m.lookup("/nope.js").is_none());
 }
 
@@ -354,9 +404,29 @@ fn content_type_equivalence() {
             );
         }
     }
-    assert!(content_type_matches("text/javascript", "text/javascript; charset=utf-8"));
+    assert!(content_type_matches(
+        "text/javascript",
+        "text/javascript; charset=utf-8"
+    ));
     assert!(!content_type_matches("application/wasm", "text/javascript"));
     assert!(!content_type_matches("text/css", "text/javascript"));
+
+    // Regression: a `vite-ssg` build signs sitemap.xml as `application/xml` and
+    // `vite preview` serves it as `text/xml`. Before these classes existed, Tier 1
+    // called that BLOCK_TAMPER and refused a file nobody had touched.
+    assert!(content_type_matches("application/xml", "text/xml"));
+    assert!(content_type_matches(
+        "application/yaml",
+        "text/yaml; charset=utf-8"
+    ));
+
+    // Loosening the table must not let an executable type in through the side door.
+    assert!(!content_type_matches("application/xml", "text/javascript"));
+    assert!(!content_type_matches(
+        "application/yaml",
+        "application/json"
+    ));
+    assert!(!content_type_matches("application/xml", "application/yaml"));
 }
 
 // ------------------------------------------------------------------ signing side

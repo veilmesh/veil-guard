@@ -1,8 +1,12 @@
 //! veil-guard CLI.
 //!
-//! Step 1 of the roadmap ships the key and rotation engine. `sign` and `verify`
-//! arrive with the asset scanner and generators in Step 2; they are deliberately
-//! absent rather than present and half-working.
+//! Three verifiers share one protocol: this binary at build time, this binary
+//! again over the network (`audit`, behind the `audit` feature), and the Service
+//! Worker that `runtime` emits. `SPEC.md` is normative for all three.
+//!
+//! The commands here are ordered the way a deployment uses them: `keygen` and
+//! `trust-root` once, `runtime` whenever the trust root changes, `sign` on every
+//! build, `verify` and `audit` after, `rotate` when a key moves.
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -18,7 +22,11 @@ use veil_guard::manifest::{
 };
 
 #[derive(Parser)]
-#[command(name = "veil-guard", version, about = "Web asset integrity and attestation")]
+#[command(
+    name = "veil-guard",
+    version,
+    about = "Web asset integrity and attestation"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -83,6 +91,16 @@ enum Commands {
         /// Recorded in the manifest as a claim by the signer, not as proof
         #[arg(long)]
         source_commit: Option<String>,
+        /// Extra `script-src` source to allow, beyond `'self'` and this page's own
+        /// inline-script hashes; repeat per source.
+        ///
+        /// A build directory cannot reveal that an inline bootstrap will inject a
+        /// script from a third-party host — a tag manager is exactly this shape — so
+        /// those hosts have to be named. Each one widens the policy:
+        /// `--csp-source https://www.googletagmanager.com`.
+        #[arg(long = "csp-source")]
+        csp_sources: Vec<String>,
+
         /// Path prefix the Service Worker must leave alone; repeat per prefix.
         ///
         /// Everything same-origin is an allowlist, so any path the app requests
@@ -262,7 +280,11 @@ fn now_unix() -> u64 {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Commands::Keygen { out_dir, name, role } => {
+        Commands::Keygen {
+            out_dir,
+            name,
+            role,
+        } => {
             fs::create_dir_all(&out_dir)?;
             let signer = SignerKeys::generate();
             let kf = KeyFile {
@@ -301,7 +323,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::TrustRoot { keys, threshold, out } => {
+        Commands::TrustRoot {
+            keys,
+            threshold,
+            out,
+        } => {
             let mut trusted: Vec<TrustedKey> = keys
                 .iter()
                 .map(|p| read_key_file(p).map(|k| k.trusted_key()))
@@ -335,6 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             headers_out,
             enforce_headers,
             source_commit,
+            csp_sources,
             excludes,
         } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
@@ -354,8 +381,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|a| (a.key.clone(), a.sha384.clone()))
                     .collect();
 
-                let html_keys: Vec<String> =
-                    assets.iter().filter(|a| a.is_html()).map(|a| a.key.clone()).collect();
+                let html_keys: Vec<String> = assets
+                    .iter()
+                    .filter(|a| a.is_html())
+                    .map(|a| a.key.clone())
+                    .collect();
 
                 let mut applied = 0usize;
                 let mut cross_origin: Vec<String> = Vec::new();
@@ -380,11 +410,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let hashes = veil_guard::generators::inline_script_hashes(&rewritten)?;
                     pages.push(veil_guard::generators::PageHeaders {
                         path: key.clone(),
-                        csp: veil_guard::generators::csp_script_src(&hashes),
+                        csp: veil_guard::generators::csp_script_src(&hashes, &csp_sources),
                     });
                 }
 
-                println!("sri          {applied} integrity attributes across {} pages", html_keys.len());
+                println!(
+                    "sri          {applied} integrity attributes across {} pages",
+                    html_keys.len()
+                );
                 cross_origin.sort();
                 cross_origin.dedup();
                 if !cross_origin.is_empty() {
@@ -415,7 +448,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sigalgs: root.sigalgs.clone(),
                 trust_root_id: root.id_hex()?,
                 trust_root: root.clone(),
-                scope: Scope { include: vec!["/".into()], exclude: excludes.clone() },
+                scope: Scope {
+                    include: vec!["/".into()],
+                    exclude: excludes.clone(),
+                },
                 source: serde_json::json!({
                     "commit": source_commit.unwrap_or_default(),
                     "toolchain": { "veil_guard": env!("CARGO_PKG_VERSION") },
@@ -435,7 +471,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = (serde_json::to_string_pretty(&manifest)? + "\n").into_bytes();
             let mut entries = Vec::new();
             for path in &keys {
-                entries.extend(read_key_file(path)?.signer()?.sign(PREFIX_MANIFEST, &payload));
+                entries.extend(
+                    read_key_file(path)?
+                        .signer()?
+                        .sign(PREFIX_MANIFEST, &payload),
+                );
             }
             let bundle = build_bundle(&entries);
 
@@ -458,7 +498,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nmanifest     {}", manifest_path.display());
             println!("version      {version}");
-            println!("trust root   {}  ({}-of-{})", manifest.trust_root_id, root.threshold, root.keys.len());
+            println!(
+                "trust root   {}  ({}-of-{})",
+                manifest.trust_root_id,
+                root.threshold,
+                root.keys.len()
+            );
             println!("signers      {}", keys.len());
             if excludes.is_empty() {
                 println!(
@@ -473,9 +518,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(dir) = headers_out {
                 fs::create_dir_all(&dir)?;
                 use veil_guard::generators::{headers_caddy, headers_netlify, headers_nginx};
-                fs::write(dir.join("_headers"), headers_netlify(&pages, enforce_headers))?;
-                fs::write(dir.join("veil-guard.nginx.conf"), headers_nginx(&pages, enforce_headers))?;
-                fs::write(dir.join("veil-guard.Caddyfile"), headers_caddy(&pages, enforce_headers))?;
+                fs::write(
+                    dir.join("_headers"),
+                    headers_netlify(&pages, enforce_headers),
+                )?;
+                fs::write(
+                    dir.join("veil-guard.nginx.conf"),
+                    headers_nginx(&pages, enforce_headers),
+                )?;
+                fs::write(
+                    dir.join("veil-guard.Caddyfile"),
+                    headers_caddy(&pages, enforce_headers),
+                )?;
                 let mode = if enforce_headers {
                     "enforcing"
                 } else {
@@ -496,9 +550,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fs::write(&sw_path, &sw)?;
             fs::write(&loader_path, veil_guard::runtime::LOADER_JS)?;
 
-            println!("worker       {}  ({} KiB)", sw_path.display(), sw.len() / 1024);
+            println!(
+                "worker       {}  ({} KiB)",
+                sw_path.display(),
+                sw.len() / 1024
+            );
             println!("loader       {}", loader_path.display());
-            println!("trust root   {}  ({}-of-{})", root.id_hex()?, root.threshold, root.keys.len());
+            println!(
+                "trust root   {}  ({}-of-{})",
+                root.id_hex()?,
+                root.threshold,
+                root.keys.len()
+            );
             println!(
                 "\nAdd to every page, ideally as the first script:\n  \
                  <script src=\"/veil-guard-loader.js\"></script>\n\n\
@@ -507,15 +570,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        Commands::Verify { dist, trust_root, pinned_version } => {
+        Commands::Verify {
+            dist,
+            trust_root,
+            pinned_version,
+        } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
 
             let payload = fs::read(dist.join("veil-guard-manifest.json"))?;
             let bundle = fs::read(dist.join("veil-guard-manifest.sig"))?;
 
-            let state =
-                verify_manifest(&payload, &bundle, &root, pinned_version, now_unix(), SUPPORTED_ALGS);
+            let state = verify_manifest(
+                &payload,
+                &bundle,
+                &root,
+                pinned_version,
+                now_unix(),
+                SUPPORTED_ALGS,
+            );
             println!("signature    {}", state.as_str());
             if state.is_hard_failure() {
                 return Err(format!("manifest verification failed: {}", state.as_str()).into());
@@ -540,7 +613,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|a| a.key.as_str())
                 .collect();
 
-            println!("assets       {} in manifest, {} on disk", manifest.assets.len(), on_disk.len());
+            println!(
+                "assets       {} in manifest, {} on disk",
+                manifest.assets.len(),
+                on_disk.len()
+            );
             for p in &mismatched {
                 println!("  TAMPERED   {p}");
             }
@@ -552,7 +629,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if mismatched.is_empty() && missing.is_empty() && unmanifested.is_empty() {
-                println!("\nall {} assets match the signed manifest", manifest.assets.len());
+                println!(
+                    "\nall {} assets match the signed manifest",
+                    manifest.assets.len()
+                );
             } else {
                 return Err(format!(
                     "{} tampered, {} missing, {} unsigned",
@@ -565,7 +645,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         #[cfg(feature = "audit")]
-        Commands::Audit { url, trust_root, label, pinned_version, graph_only, fail_on, out, json } => {
+        Commands::Audit {
+            url,
+            trust_root,
+            label,
+            pinned_version,
+            graph_only,
+            fail_on,
+            out,
+            json,
+        } => {
             use veil_guard::auditor::{audit, AuditOptions, Severity};
 
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
@@ -589,7 +678,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(l) = &snapshot.label {
                     println!("vantage      {l}");
                 }
-                println!("trust root   {}  (local file, not fetched)", snapshot.trust_root_id);
+                println!(
+                    "trust root   {}  (local file, not fetched)",
+                    snapshot.trust_root_id
+                );
                 println!("manifest     {}", snapshot.manifest_state);
                 if let Some(v) = snapshot.manifest_version {
                     println!("version      {v}");
@@ -651,9 +743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&divergences)?);
             } else {
-                let name = |s: &Snapshot| {
-                    s.label.clone().unwrap_or_else(|| s.url.clone())
-                };
+                let name = |s: &Snapshot| s.label.clone().unwrap_or_else(|| s.url.clone());
                 println!("left         {}  @{}", name(&a), a.observed_at);
                 println!("right        {}  @{}", name(&b), b.observed_at);
 
@@ -678,7 +768,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Rotate { from, to, keys, out, version } => {
+        Commands::Rotate {
+            from,
+            to,
+            keys,
+            out,
+            version,
+        } => {
             let old: TrustRoot = serde_json::from_slice(&fs::read(&from)?)?;
             let new: TrustRoot = serde_json::from_slice(&fs::read(&to)?)?;
             old.validate()?;
@@ -694,13 +790,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut entries = Vec::new();
             for path in &keys {
-                entries.extend(read_key_file(path)?.signer()?.sign(PREFIX_ROTATION, &payload));
+                entries.extend(
+                    read_key_file(path)?
+                        .signer()?
+                        .sign(PREFIX_ROTATION, &payload),
+                );
             }
             let bundle = build_bundle(&entries);
 
             // Refuse to emit a statement that would not be accepted. Discovering a
             // short quorum here beats discovering it once clients are pinned.
-            if verify_rotation(&payload, &bundle, &old, 0, SUPPORTED_ALGS) != RotationVerdict::Accept
+            if verify_rotation(&payload, &bundle, &old, 0, SUPPORTED_ALGS)
+                != RotationVerdict::Accept
             {
                 return Err(format!(
                     "rotation would be rejected: {} signer(s) supplied, old root needs {}",

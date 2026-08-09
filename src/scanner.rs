@@ -81,9 +81,10 @@ pub fn scan_dist(dist: &Path) -> Result<Vec<ScannedAsset>, ScanError> {
 
     for entry in WalkDir::new(&root).follow_links(false) {
         let entry = entry.map_err(|e| {
-            ScanError::Io(e.into_io_error().unwrap_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "walk failed")
-            }))
+            ScanError::Io(
+                e.into_io_error()
+                    .unwrap_or_else(|| std::io::Error::other("walk failed")),
+            )
         })?;
 
         if entry.file_type().is_symlink() {

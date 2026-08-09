@@ -1,6 +1,14 @@
 /target
-/.keys
-*.key
-*.pub
 node_modules
 .DS_Store
+
+# Signer identities. `keygen` writes `<name>.key.json` and `<name>.pub.json`, so
+# the bare `*.key` / `*.pub` patterns these replaced matched neither.
+/.keys
+*.key.json
+*.pub.json
+*.key
+*.pub
+
+# Scratch directory used by the end-to-end CI job and by anyone running it locally.
+/e2e

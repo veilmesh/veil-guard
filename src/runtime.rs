@@ -57,7 +57,9 @@ pub fn strip_module_syntax(source: &str) -> Result<String, String> {
                 continue;
             }
             if !(line.contains("'./") || line.contains("\"./")) {
-                return Err(format!("unexpected non-local import in runtime source: {line}"));
+                return Err(format!(
+                    "unexpected non-local import in runtime source: {line}"
+                ));
             }
             continue;
         }
@@ -152,10 +154,8 @@ mod tests {
 
     #[test]
     fn bundled_worker_has_no_module_syntax_left() {
-        let root: TrustRoot = serde_json::from_str(
-            r#"{"threshold":1,"sigalgs":["ed25519"],"keys":[]}"#,
-        )
-        .unwrap();
+        let root: TrustRoot =
+            serde_json::from_str(r#"{"threshold":1,"sigalgs":["ed25519"],"keys":[]}"#).unwrap();
         let bundle = bundle_service_worker(&root).unwrap();
         for (i, line) in bundle.lines().enumerate() {
             let t = line.trim_start();

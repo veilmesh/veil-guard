@@ -66,32 +66,117 @@
 
 ### 1. Installation
 
+The out-of-band auditor reaches the network, so it is kept behind a feature flag:
+the default build is small enough to review, and nothing that signs can also fetch.
+Install with `--features audit` on the machine that runs audits — not on the one
+that holds signing keys.
+
 ```bash
-cargo install --path .
+cargo install --path . --features audit
 ```
 
-### 2. Generate Keypair (2-of-3 Threshold)
+### 2. Generate signer identities
+
+One signer is one Ed25519 keypair *and* one P-256 keypair, bound together by a key
+ID (SPEC §4.1). Each `keygen` writes `<name>.key.json` (private, mode 0600,
+**unencrypted**) and `<name>.pub.json`.
+
+A `recovery` key exists to survive the compromise of a build machine, so it must
+never be stored on one.
 
 ```bash
-veil-guard keygen --out-dir .keys
+veil-guard keygen --out-dir .keys --name alice
 ```
 
-### 3. Sign Web Build Directory
-
 ```bash
-veil-guard sign --dist ./dist --key-file .keys/veil-guard.key
+veil-guard keygen --out-dir .keys --name bob
 ```
 
-### 4. Verify Local Build
-
 ```bash
-veil-guard verify --dist ./dist --pubkey-file .keys/veil-guard.pub
+veil-guard keygen --out-dir .keys --name carol --role recovery
 ```
 
-### 5. Run Out-of-Band Remote Audit
+### 3. Assemble the trust root (2-of-3)
+
+The trust root is what clients pin. Build it from the *public* halves; its ID is a
+hash over a binary encoding, so it never depends on JSON formatting (SPEC §4.5).
 
 ```bash
-veil-guard audit --url https://app.veilmesh.com --pubkey-file .keys/veil-guard.pub
+veil-guard trust-root --key .keys/alice.pub.json --key .keys/bob.pub.json --key .keys/carol.pub.json --threshold 2 --out trust-root.json
+```
+
+### 4. Emit the Tier 1 runtime
+
+Writes a self-contained Service Worker with the trust root baked in, plus the
+page-side loader. Point `--out` at the directory your bundler copies verbatim
+(`public/` for Vite) so the worker lands at the site root and can claim scope `/`.
+Re-run this only when the trust root changes, not on every build.
+
+```bash
+veil-guard runtime --trust-root trust-root.json --out public
+```
+
+Then load it from every page, ideally as the first script:
+
+```html
+<script src="/veil-guard-loader.js"></script>
+```
+
+### 5. Build, then sign
+
+`sign` must run **after** the bundler, against the build output — it rewrites the
+HTML in place to add `integrity` attributes, and hashes the result (SPEC §10).
+
+Scope is the whole origin, so the worker refuses every same-origin request that is
+not a signed file. Dynamic endpoints have no file to sign and must be carved out
+with `--exclude`, or those calls will be blocked.
+
+```bash
+npm run build && veil-guard sign --dist ./dist --trust-root trust-root.json --key .keys/alice.key.json --key .keys/bob.key.json --exclude /api/ --headers-out ./headers
+```
+
+`--headers-out` writes `_headers`, `veil-guard.nginx.conf` and
+`veil-guard.Caddyfile` with per-page CSP inline-script hashes and a report-only
+`Integrity-Policy`. Add `--enforce-headers` only once `audit` reports no
+missing-integrity findings.
+
+Inline scripts are hashed from the built page, but a host that an inline bootstrap
+goes on to *inject* from appears nowhere in `dist` and has to be named, or the
+generated policy will block it. A tag manager is exactly this shape:
+
+```bash
+veil-guard sign --dist ./dist --trust-root trust-root.json --key .keys/alice.key.json --key .keys/bob.key.json --csp-source https://www.googletagmanager.com --headers-out ./headers
+```
+
+### 6. Verify the local build
+
+```bash
+veil-guard verify --dist ./dist --trust-root trust-root.json
+```
+
+### 7. Run an out-of-band remote audit
+
+The trust root is read from this local file and never from the audited site — that
+is the whole point of the command. Give each vantage point a `--label` and keep the
+snapshots: divergence between them is the only signal that reveals a bundle served
+to some visitors and not others.
+
+```bash
+veil-guard audit --url https://app.veilmesh.com --trust-root trust-root.json --label eu-west --out snapshots/eu-west.json
+```
+
+```bash
+veil-guard diff snapshots/eu-west.json snapshots/us-east.json
+```
+
+### Rotating the trust root
+
+A rotation statement moves clients that *already* trust the old root. It is not a
+revocation — see SPEC §9.2 for why a compromised origin cannot be made to deliver
+one.
+
+```bash
+veil-guard rotate --from trust-root.json --to trust-root-next.json --key .keys/alice.key.json --key .keys/bob.key.json --out dist/veil-guard-rotation.json
 ```
 
 ---
@@ -104,15 +189,36 @@ See [`SPEC.md`](./SPEC.md) for the normative specification of binary containers 
 
 ## 🧪 Testing & Conformance
 
-`veil-guard` features a frozen cross-language test vector suite:
+`testdata/conformance_vectors.json` is the executable form of `SPEC.md`, and it is
+frozen: P-256 signing is randomized, so regenerating it produces different — equally
+valid — signatures and destroys the cross-implementation meaning of the suite. Both
+implementations are held to the same file.
 
 ```bash
-# Run Rust test suite
-cargo test
+cargo test --all-targets --features audit
+```
 
-# Run JS WebCrypto verifier against conformance vectors
+```bash
 node testdata/verify_vectors.mjs
 ```
+
+```bash
+node testdata/verify_policy.mjs
+```
+
+The two remaining scripts consume output the CLI just produced, rather than fixtures
+— they are the Rust-signs / JavaScript-verifies direction:
+
+```bash
+node testdata/verify_manifest.mjs ./dist trust-root.json VALID
+```
+
+```bash
+node testdata/run_sw_smoke.mjs public/veil-guard-sw.js
+```
+
+CI runs all of the above, plus lints and an end-to-end sign → cross-verify → tamper
+round trip. See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ---
 

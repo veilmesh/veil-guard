@@ -9,7 +9,12 @@
 use std::collections::BTreeMap;
 use veil_guard::auditor::*;
 
-fn snap(label: &str, manifest_hash: &str, assets: &[(&str, &str)], findings: Vec<Finding>) -> Snapshot {
+fn snap(
+    label: &str,
+    manifest_hash: &str,
+    assets: &[(&str, &str)],
+    findings: Vec<Finding>,
+) -> Snapshot {
     let mut observed = BTreeMap::new();
     for (path, digest) in assets {
         observed.insert(
@@ -85,7 +90,11 @@ fn an_injected_unmanifested_script_shows_up_via_findings() {
         vec![finding("unmanifested-subresource", "/assets/evil.js")],
     );
     let d = diff(&a, &b);
-    assert_eq!(d.len(), 1, "byte comparison alone would report nothing here");
+    assert_eq!(
+        d.len(),
+        1,
+        "byte comparison alone would report nothing here"
+    );
     assert_eq!(d[0].kind, "finding-only-in-right:unmanifested-subresource");
     assert_eq!(d[0].subject, "/assets/evil.js");
 }
@@ -95,7 +104,10 @@ fn findings_present_on_both_sides_are_not_divergences() {
     let f = || vec![finding("content-type-mismatch", "/x.yaml")];
     let a = snap("eu", "aa", &[], f());
     let b = snap("us", "aa", &[], f());
-    assert!(diff(&a, &b).is_empty(), "a shared quirk is not selective delivery");
+    assert!(
+        diff(&a, &b).is_empty(),
+        "a shared quirk is not selective delivery"
+    );
 }
 
 #[test]
@@ -114,7 +126,12 @@ fn severity_threshold_controls_cleanliness() {
     assert!(!critical.is_clean());
     assert!(!critical.is_clean_at(Severity::Critical));
 
-    let mut warn = snap("x", "aa", &[], vec![finding("content-type-mismatch", "/a.yaml")]);
+    let mut warn = snap(
+        "x",
+        "aa",
+        &[],
+        vec![finding("content-type-mismatch", "/a.yaml")],
+    );
     warn.findings[0].severity = Severity::Warning;
     assert!(!warn.is_clean(), "warnings fail by default");
     assert!(

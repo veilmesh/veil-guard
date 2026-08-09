@@ -326,6 +326,8 @@ const CT_CLASSES = [
     'application/ecmascript',
   ],
   ['application/json', 'text/json'],
+  ['application/xml', 'text/xml'],
+  ['application/yaml', 'text/yaml', 'application/x-yaml', 'text/x-yaml'],
 ];
 
 export function contentTypeMatches(expected, actual) {

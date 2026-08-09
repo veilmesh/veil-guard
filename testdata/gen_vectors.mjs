@@ -403,6 +403,8 @@ const out = {
   content_type_equivalence: {
     'text/javascript': ['application/javascript', 'application/x-javascript', 'text/ecmascript', 'application/ecmascript'],
     'application/json': ['text/json'],
+    'application/xml': ['text/xml'],
+    'application/yaml': ['text/yaml', 'application/x-yaml', 'text/x-yaml'],
     'application/wasm': [],
     'text/css': [],
   },

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      # The auditor is behind a feature flag, so both shapes of the crate need
+      # linting: the default build must stay free of network code, and the
+      # audit build must still compile clean.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features audit -- -D warnings
+
+      - run: cargo test --all-targets
+      - run: cargo test --all-targets --features audit
+
+  # SPEC.md §11: the conformance vectors are only meaningful if a second,
+  # independent implementation is held to them. These are the JavaScript side.
+  javascript:
+    name: javascript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Conformance vectors (WebCrypto verifier)
+        run: node testdata/verify_vectors.mjs
+
+      - name: Tier 1 policy state machine
+        run: node testdata/verify_policy.mjs
+
+  # A build the CLI signs must verify under the JavaScript verifier and produce
+  # a Service Worker bundle that actually evaluates. Neither is provable from
+  # the unit tests alone.
+  end-to-end:
+    name: end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --features audit
+
+      - name: Sign a build and cross-verify it
+        run: |
+          set -euxo pipefail
+          BIN=./target/release/veil-guard
+          mkdir -p e2e/dist/assets
+          printf 'body{color:#000}\n' > e2e/dist/assets/app.css
+          printf 'export const x = 1;\n' > e2e/dist/assets/app.js
+          cat > e2e/dist/index.html <<'HTML'
+          <!doctype html>
+          <html><head>
+          <link rel="stylesheet" href="/assets/app.css">
+          <script type="module" src="/assets/app.js"></script>
+          <script>window.__BOOT__=1;</script>
+          </head><body><div id="app"></div></body></html>
+          HTML
+
+          $BIN keygen --out-dir e2e/keys --name alice
+          $BIN keygen --out-dir e2e/keys --name bob
+          $BIN trust-root \
+            --key e2e/keys/alice.pub.json \
+            --key e2e/keys/bob.pub.json \
+            --threshold 2 --out e2e/trust-root.json
+
+          $BIN sign --dist e2e/dist --trust-root e2e/trust-root.json \
+            --key e2e/keys/alice.key.json --key e2e/keys/bob.key.json \
+            --headers-out e2e/headers
+          $BIN verify --dist e2e/dist --trust-root e2e/trust-root.json
+          $BIN runtime --trust-root e2e/trust-root.json --out e2e/public
+
+          # The Rust signer and the JavaScript verifier must agree on the same bytes.
+          node testdata/verify_manifest.mjs e2e/dist e2e/trust-root.json VALID
+          node testdata/run_sw_smoke.mjs e2e/public/veil-guard-sw.js
+
+      - name: Tampering is detected
+        run: |
+          set -euxo pipefail
+          printf 'export const x = 2;\n' > e2e/dist/assets/app.js
+          if ./target/release/veil-guard verify \
+               --dist e2e/dist --trust-root e2e/trust-root.json; then
+            echo "verify accepted a modified asset" >&2
+            exit 1
+          fi

@@ -59,7 +59,10 @@ fn bundle_carries_the_trust_root_and_drops_module_syntax() {
     let root = sample_trust_root();
     let bundle = bundle_service_worker(&root).unwrap();
 
-    assert!(bundle.contains(&root.keys[0].ed25519), "keys must be baked in");
+    assert!(
+        bundle.contains(&root.keys[0].ed25519),
+        "keys must be baked in"
+    );
     assert!(bundle.contains("self.VEIL_GUARD_TRUST_ROOT = "));
     for line in bundle.lines() {
         let t = line.trim_start();
@@ -79,8 +82,8 @@ fn bundle_carries_the_trust_root_and_drops_module_syntax() {
 fn bundle_includes_every_module_and_the_lifecycle_handlers() {
     let bundle = bundle_service_worker(&sample_trust_root()).unwrap();
     for needle in [
-        "function verifyManifest",     // verify core
-        "function decideRequest",      // policy
+        "function verifyManifest", // verify core
+        "function decideRequest",  // policy
         "function decideResponse",
         "function applyRotationChain",
         "addEventListener('install'",
@@ -96,7 +99,10 @@ fn loader_is_shipped_as_authored() {
     assert!(LOADER_JS.contains("navigator.serviceWorker"));
     // The overlay reports on attacker-influenced strings; it must build DOM nodes
     // with textContent rather than parsing markup.
-    assert!(!LOADER_JS.contains("innerHTML"), "the loader must not assign innerHTML");
+    assert!(
+        !LOADER_JS.contains("innerHTML"),
+        "the loader must not assign innerHTML"
+    );
 }
 
 #[test]
@@ -129,7 +135,10 @@ fn runtime_sources_avoid_the_transform_hazard() {
         let mut open_template = false;
         for (i, line) in src.lines().enumerate() {
             if open_template && (line.starts_with("export ") || line.starts_with("import ")) {
-                panic!("{name}:{}: module keyword at column 0 inside a template literal", i + 1);
+                panic!(
+                    "{name}:{}: module keyword at column 0 inside a template literal",
+                    i + 1
+                );
             }
             // Backticks in `//` comments are prose, not code.
             let code = line.split("//").next().unwrap_or("");

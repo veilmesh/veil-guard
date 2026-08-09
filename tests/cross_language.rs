@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use veil_guard::crypto::{build_bundle, SigAlg, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST};
+use veil_guard::crypto::{
+    build_bundle, SigAlg, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST,
+};
 use veil_guard::manifest::{AssetEntry, Manifest, Scope, SPEC_MANIFEST};
 use veil_guard::scanner::scan_dist;
 
@@ -21,7 +23,9 @@ fn node_available() -> bool {
 }
 
 fn testdata(file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join(file)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata")
+        .join(file)
 }
 
 struct Fixture {
@@ -45,7 +49,11 @@ fn build_signed_fixture(name: &str) -> Fixture {
     std::fs::write(dist.join("assets/app.js"), b"export const x = 1;\n").unwrap();
     std::fs::write(dist.join("assets/style.css"), b":root{}\n").unwrap();
     // A non-ASCII name, so the NFC rules are exercised on a real filesystem.
-    std::fs::write(dist.join("assets/café.js"), b"export default 'caf\xc3\xa9';\n").unwrap();
+    std::fs::write(
+        dist.join("assets/café.js"),
+        b"export default 'caf\xc3\xa9';\n",
+    )
+    .unwrap();
 
     let signers: Vec<SignerKeys> = (0..3).map(|_| SignerKeys::generate()).collect();
     let mut keys: Vec<TrustedKey> = signers
@@ -71,7 +79,10 @@ fn build_signed_fixture(name: &str) -> Fixture {
         sigalgs: root.sigalgs.clone(),
         trust_root_id: root.id_hex().unwrap(),
         trust_root: root.clone(),
-        scope: Scope { include: vec!["/".into()], exclude: vec![] },
+        scope: Scope {
+            include: vec!["/".into()],
+            exclude: vec![],
+        },
         source: serde_json::json!({}),
         assets: assets
             .iter()
@@ -126,7 +137,10 @@ fn javascript_verifies_a_rust_signed_build() {
     }
     let fixture = build_signed_fixture("valid");
     let (ok, output) = run_js_verifier(&fixture, "VALID");
-    assert!(ok, "JS verifier rejected a valid Rust-signed build:\n{output}");
+    assert!(
+        ok,
+        "JS verifier rejected a valid Rust-signed build:\n{output}"
+    );
     assert!(output.contains("assets matching : 4/4"), "{output}");
 }
 
@@ -145,7 +159,10 @@ fn javascript_detects_a_tampered_asset() {
     // The manifest itself is untouched, so it still verifies; the asset does not.
     let (ok, output) = run_js_verifier(&fixture, "VALID");
     assert!(!ok, "a modified asset must fail the JS check:\n{output}");
-    assert!(output.contains("sha256 mismatch  /assets/app.js"), "{output}");
+    assert!(
+        output.contains("sha256 mismatch  /assets/app.js"),
+        "{output}"
+    );
 }
 
 #[test]
@@ -211,5 +228,8 @@ fn javascript_rejects_an_unrelated_trust_root() {
     .unwrap();
 
     let (ok, output) = run_js_verifier(&fixture, "UNTRUSTED_ROOT");
-    assert!(ok, "a foreign trust root must yield UNTRUSTED_ROOT:\n{output}");
+    assert!(
+        ok,
+        "a foreign trust root must yield UNTRUSTED_ROOT:\n{output}"
+    );
 }

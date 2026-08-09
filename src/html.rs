@@ -118,8 +118,8 @@ pub fn scan(html: &[u8]) -> Result<Vec<Tag>, HtmlError> {
         // or a '<' inside a JavaScript string would be read as markup.
         let is_raw_text = name == "script" || name == "style";
         if is_raw_text && !self_closing {
-            let close = find_close_tag(html, gt + 1, &name)
-                .ok_or(HtmlError::UnterminatedRawText(i))?;
+            let close =
+                find_close_tag(html, gt + 1, &name).ok_or(HtmlError::UnterminatedRawText(i))?;
             if name == "script" {
                 tag.content = Some((gt + 1, close));
             }
@@ -171,7 +171,9 @@ fn parse_attributes(html: &[u8], mut i: usize) -> Result<(Vec<Attr>, usize, bool
         }
 
         let name_start = i;
-        while i < html.len() && !html[i].is_ascii_whitespace() && !matches!(html[i], b'=' | b'>' | b'/')
+        while i < html.len()
+            && !html[i].is_ascii_whitespace()
+            && !matches!(html[i], b'=' | b'>' | b'/')
         {
             i += 1;
         }
@@ -254,7 +256,10 @@ fn decode_entities(raw: &[u8]) -> String {
 }
 
 fn memchr(hay: &[u8], from: usize, needle: u8) -> Option<usize> {
-    hay.iter().skip(from).position(|&b| b == needle).map(|p| p + from)
+    hay.iter()
+        .skip(from)
+        .position(|&b| b == needle)
+        .map(|p| p + from)
 }
 
 fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
@@ -271,7 +276,7 @@ fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 ///
 /// This is the only way this crate is permitted to modify HTML: every byte that is
 /// not at an insertion point is copied through unchanged.
-pub fn splice(original: &[u8], insertions: &mut Vec<(usize, String)>) -> Vec<u8> {
+pub fn splice(original: &[u8], insertions: &mut [(usize, String)]) -> Vec<u8> {
     insertions.sort_by_key(|(at, _)| *at);
     let added: usize = insertions.iter().map(|(_, s)| s.len()).sum();
     let mut out = Vec::with_capacity(original.len() + added);

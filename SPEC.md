@@ -299,6 +299,14 @@ after mapping through this equivalence table:
 | `application/wasm` | *(none)* |
 | `text/css` | *(none)* |
 | `application/json` | `text/json` |
+| `application/xml` | `text/xml` |
+| `application/yaml` | `text/yaml`, `application/x-yaml`, `text/x-yaml` |
+
+The XML and YAML rows are not a convenience. RFC 7303 §9.2 declares `text/xml` and
+`application/xml` equivalent, and RFC 9512 registered `application/yaml` only in 2024
+over two decades of `text/yaml` and `application/x-yaml` in the wild. A signer and a
+server that pick different spellings of the same type are both right, and a verifier
+that calls the difference tampering blocks a `sitemap.xml` that nobody touched.
 
 A `content_type` mismatch outside these classes is `BLOCK_TAMPER` in Tier 1 and a
 reported finding in Tier 0. The byte hash already fixes the content; this check exists

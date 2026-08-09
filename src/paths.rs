@@ -124,6 +124,13 @@ pub fn content_type_matches(expected: &str, actual: &str) -> bool {
             "application/ecmascript",
         ],
         &["application/json", "text/json"],
+        &["application/xml", "text/xml"],
+        &[
+            "application/yaml",
+            "text/yaml",
+            "application/x-yaml",
+            "text/x-yaml",
+        ],
     ];
     CLASSES
         .iter()
@@ -131,5 +138,9 @@ pub fn content_type_matches(expected: &str, actual: &str) -> bool {
 }
 
 fn essence(ct: &str) -> String {
-    ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+    ct.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }

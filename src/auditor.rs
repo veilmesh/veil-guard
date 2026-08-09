@@ -45,7 +45,12 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(severity: Severity, kind: &str, subject: impl Into<String>, detail: impl Into<String>) -> Self {
+    fn new(
+        severity: Severity,
+        kind: &str,
+        subject: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
         Finding {
             severity,
             kind: kind.to_string(),
@@ -142,9 +147,16 @@ impl Client {
         let config = ureq::Agent::config_builder()
             .max_redirects(0)
             .timeout_global(Some(timeout))
-            .user_agent(concat!("veil-guard/", env!("CARGO_PKG_VERSION"), " (auditor)"))
+            .user_agent(concat!(
+                "veil-guard/",
+                env!("CARGO_PKG_VERSION"),
+                " (auditor)"
+            ))
             .build();
-        Client { agent: config.into(), max_body }
+        Client {
+            agent: config.into(),
+            max_body,
+        }
     }
 
     fn get(&self, url: &str) -> Result<Fetched, AuditError> {
@@ -161,7 +173,12 @@ impl Client {
             Ok(r) => r,
             // A non-2xx is data, not a transport failure: record and carry on.
             Err(ureq::Error::StatusCode(code)) => {
-                return Ok(Fetched { status: code, body: Vec::new(), content_type: None, location: None })
+                return Ok(Fetched {
+                    status: code,
+                    body: Vec::new(),
+                    content_type: None,
+                    location: None,
+                })
             }
             Err(e) => return Err(AuditError::Http(format!("{url}: {e}"))),
         };
@@ -185,7 +202,12 @@ impl Client {
             .read_to_vec()
             .map_err(|e| AuditError::Http(format!("{url}: {e}")))?;
 
-        Ok(Fetched { status, body, content_type, location })
+        Ok(Fetched {
+            status,
+            body,
+            content_type,
+            location,
+        })
     }
 }
 
@@ -281,7 +303,10 @@ pub fn audit(
             Severity::Critical,
             "manifest-verification-failed",
             base.clone(),
-            format!("manifest verifies as {} against the supplied trust root", state.as_str()),
+            format!(
+                "manifest verifies as {} against the supplied trust root",
+                state.as_str()
+            ),
         ));
         snapshot.findings = findings;
         return Ok(snapshot);
@@ -312,7 +337,11 @@ pub fn audit(
     // Limited by construction: this sees the static graph only. Route chunks that a
     // router loads at runtime never appear in served markup, so their absence from
     // this list is not evidence of anything.
-    for entry in manifest.assets.iter().filter(|a| a.content_type == "text/html") {
+    for entry in manifest
+        .assets
+        .iter()
+        .filter(|a| a.content_type == "text/html")
+    {
         let url = format!("{base}{}", entry.path);
         let page = client.get(&url)?;
         if page.status != 200 {
@@ -344,12 +373,19 @@ pub fn audit(
                     // The signal worth having. Something is being loaded that nobody
                     // signed — SRI would not catch it, because SRI only constrains
                     // tags that carry an integrity attribute.
-                    let severity = if tag.name == "script" { Severity::Critical } else { Severity::Warning };
+                    let severity = if tag.name == "script" {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    };
                     findings.push(Finding::new(
                         severity,
                         "unmanifested-subresource",
                         key.clone(),
-                        format!("<{}> on {} references an asset absent from the manifest", tag.name, entry.path),
+                        format!(
+                            "<{}> on {} references an asset absent from the manifest",
+                            tag.name, entry.path
+                        ),
                     ));
                 }
                 Some(asset) => {
@@ -360,10 +396,15 @@ pub fn audit(
                                 Severity::Critical,
                                 "sri-mismatch",
                                 key.clone(),
-                                format!("integrity attribute on {} does not match the signed digest", entry.path),
+                                format!(
+                                    "integrity attribute on {} does not match the signed digest",
+                                    entry.path
+                                ),
                             ));
                         }
-                    } else if tag.name == "script" || tag.attr("rel").is_some_and(|r| r.contains("stylesheet")) {
+                    } else if tag.name == "script"
+                        || tag.attr("rel").is_some_and(|r| r.contains("stylesheet"))
+                    {
                         findings.push(Finding::new(
                             Severity::Warning,
                             "missing-integrity",
@@ -419,7 +460,10 @@ pub fn audit(
                         Severity::Critical,
                         "content-mismatch",
                         entry.path.clone(),
-                        format!("served bytes hash to {digest}, manifest says {}", entry.sha256),
+                        format!(
+                            "served bytes hash to {digest}, manifest says {}",
+                            entry.sha256
+                        ),
                     ));
                 } else if let Some(ct) = &res.content_type {
                     if !content_type_matches(&entry.content_type, ct) {
@@ -499,8 +543,14 @@ pub fn diff(left: &Snapshot, right: &Snapshot) -> Vec<Divergence> {
         out.push(Divergence {
             kind: "manifest-differs".into(),
             subject: "veil-guard-manifest.json".into(),
-            left: left.manifest_sha256.clone().unwrap_or_else(|| "absent".into()),
-            right: right.manifest_sha256.clone().unwrap_or_else(|| "absent".into()),
+            left: left
+                .manifest_sha256
+                .clone()
+                .unwrap_or_else(|| "absent".into()),
+            right: right
+                .manifest_sha256
+                .clone()
+                .unwrap_or_else(|| "absent".into()),
         });
     }
     if left.manifest_state != right.manifest_state {
@@ -552,20 +602,32 @@ pub fn diff(left: &Snapshot, right: &Snapshot) -> Vec<Divergence> {
             (Some(a), Some(b)) if a.sha256 != b.sha256 => out.push(Divergence {
                 kind: "content-differs".into(),
                 subject: key.clone(),
-                left: a.sha256.clone().unwrap_or_else(|| format!("HTTP {}", a.http_status)),
-                right: b.sha256.clone().unwrap_or_else(|| format!("HTTP {}", b.http_status)),
+                left: a
+                    .sha256
+                    .clone()
+                    .unwrap_or_else(|| format!("HTTP {}", a.http_status)),
+                right: b
+                    .sha256
+                    .clone()
+                    .unwrap_or_else(|| format!("HTTP {}", b.http_status)),
             }),
             (Some(a), None) => out.push(Divergence {
                 kind: "only-in-left".into(),
                 subject: key.clone(),
-                left: a.sha256.clone().unwrap_or_else(|| format!("HTTP {}", a.http_status)),
+                left: a
+                    .sha256
+                    .clone()
+                    .unwrap_or_else(|| format!("HTTP {}", a.http_status)),
                 right: "not observed".into(),
             }),
             (None, Some(b)) => out.push(Divergence {
                 kind: "only-in-right".into(),
                 subject: key.clone(),
                 left: "not observed".into(),
-                right: b.sha256.clone().unwrap_or_else(|| format!("HTTP {}", b.http_status)),
+                right: b
+                    .sha256
+                    .clone()
+                    .unwrap_or_else(|| format!("HTTP {}", b.http_status)),
             }),
             _ => {}
         }

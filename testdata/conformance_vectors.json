@@ -219,6 +219,14 @@
     "application/json": [
       "text/json"
     ],
+    "application/xml": [
+      "text/xml"
+    ],
+    "application/yaml": [
+      "text/yaml",
+      "application/x-yaml",
+      "text/x-yaml"
+    ],
     "application/wasm": [],
     "text/css": []
   },

@@ -46,7 +46,10 @@ impl std::fmt::Display for CryptoError {
             CryptoError::BadHex => write!(f, "malformed hex (must be lowercase, even length)"),
             CryptoError::BadLength => write!(f, "unexpected byte length"),
             CryptoError::BadP256Point => {
-                write!(f, "P-256 public key must be 65-byte uncompressed SEC1 (0x04 || X || Y)")
+                write!(
+                    f,
+                    "P-256 public key must be 65-byte uncompressed SEC1 (0x04 || X || Y)"
+                )
             }
             CryptoError::TrustRootInvalid(why) => write!(f, "invalid trust root: {why}"),
         }
@@ -58,7 +61,11 @@ impl std::error::Error for CryptoError {}
 /// SPEC §2: hex is lowercase only. Uppercase is rejected rather than normalized,
 /// so that a manifest has exactly one valid spelling of every byte string.
 pub fn unhex(s: &str) -> Result<Vec<u8>, CryptoError> {
-    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if !s.len().is_multiple_of(2)
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(CryptoError::BadHex);
     }
     hex::decode(s).map_err(|_| CryptoError::BadHex)
@@ -228,7 +235,9 @@ impl TrustRoot {
     }
 
     pub fn find(&self, id: &KeyId) -> Option<&TrustedKey> {
-        self.keys.iter().find(|k| k.key_id_bytes().is_ok_and(|k| &k == id))
+        self.keys
+            .iter()
+            .find(|k| k.key_id_bytes().is_ok_and(|k| &k == id))
     }
 }
 
@@ -273,7 +282,7 @@ pub fn parse_bundle(bytes: &[u8]) -> Result<Vec<SigEntry>, BundleError> {
     }
 
     let count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-    if count < 1 || count > MAX_BUNDLE_ENTRIES {
+    if !(1..=MAX_BUNDLE_ENTRIES).contains(&count) {
         return Err(BundleError::EntryCountOutOfRange);
     }
 
@@ -359,7 +368,8 @@ pub fn verify_ed25519(pub_key: &[u8; 32], sig: &[u8], msg: &[u8]) -> bool {
     let Ok(sig_arr) = <[u8; 64]>::try_from(sig) else {
         return false;
     };
-    vk.verify_strict(msg, &ed25519_dalek::Signature::from_bytes(&sig_arr)).is_ok()
+    vk.verify_strict(msg, &ed25519_dalek::Signature::from_bytes(&sig_arr))
+        .is_ok()
 }
 
 /// SPEC §2.1: uncompressed SEC1 public key in, raw `r||s` signature in. Neither
@@ -502,7 +512,10 @@ impl SignerKeys {
     /// Uncompressed SEC1, 65 bytes — the encoding WebCrypto imports (SPEC §2.1).
     pub fn p256_public(&self) -> [u8; 65] {
         let point = self.p256.verifying_key().to_encoded_point(false);
-        point.as_bytes().try_into().expect("uncompressed point is 65 bytes")
+        point
+            .as_bytes()
+            .try_into()
+            .expect("uncompressed point is 65 bytes")
     }
 
     pub fn key_id(&self) -> KeyId {
