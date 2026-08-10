@@ -254,7 +254,8 @@ duplicate `spec`, `version`, `not_after`, `sigalgs`, `trust_root`, `trust_root_i
   "trust_root": { "threshold": 2, "sigalgs": ["ed25519","p256"], "keys": [ … ] },
   "scope": {
     "include": ["/"],
-    "exclude": ["/api/"]
+    "exclude": ["/api/"],
+    "html_extension": false
   },
   "source": {
     "commit": "…",
@@ -286,6 +287,10 @@ duplicate `spec`, `version`, `not_after`, `sigalgs`, `trust_root`, `trust_root_i
   NFC-normalized UTF-8 encoding. Duplicate paths **MUST** be rejected.
 - `sha384` is present so that the out-of-band auditor can cross-check the `integrity`
   attributes it finds in served HTML without re-deriving them. Tier 1 does not use it.
+- `scope.html_extension` defaults to `false` when absent. It enables step 3 of §7.1.1
+  and nothing else. A verifier that does not recognize the member ignores it and
+  resolves navigations without the fallback, which is the safe direction: an
+  unresolved navigation passes through rather than being blocked.
 
 ### 6.4 `content_type` comparison
 
@@ -391,6 +396,29 @@ A verifier turns a request URL into a manifest key as follows:
 > A verifier that works from a raw string instead — the CLI auditor reading an
 > `href` out of served markup, for instance — gets no such normalization and must
 > apply every rule above itself.
+
+### 7.1.1 Resolving a key to a manifest entry
+
+A key derived by §7.1 is looked up as follows. The first match wins; there is no
+further fallback.
+
+1. An entry whose `path` equals the key exactly.
+2. If the key ends in `/`, an entry whose `path` is the key followed by `index.html`.
+   Directory-style URLs are how every static host serves a directory, and the file
+   behind `/` is `/index.html` on all of them.
+3. **Only if the manifest sets `scope.html_extension` to `true`, and only for a
+   navigation** (§8.3): an entry whose `path` is the key followed by `.html`.
+
+Step 3 is opt-in because only the signer knows how their host maps URLs onto files.
+A host that serves `/faq` from `faq.html` — the flat output of most static site
+generators — wants it, and turning it on takes those documents from unverified to
+verified. A host configured with a single-page-app fallback answers `/faq` with
+`index.html`, and there the same rule would compare `index.html`'s bytes against
+`faq.html`'s entry and report a correct deployment as `BLOCK_TAMPER`. A verifier
+**MUST NOT** apply step 3 when the flag is absent.
+
+Steps 2 and 3 apply to the key as derived, never recursively: `/a/` resolves to
+`/a/index.html` and stops, and `/a` never resolves to `/a/index.html`.
 
 ### 7.2 Redirects
 

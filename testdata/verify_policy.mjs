@@ -134,6 +134,51 @@ check(
     .outcome === 'BLOCK_UNMANIFESTED',
 );
 
+console.log('\nextensionless navigations (SPEC §7.1.1 step 3)');
+// A static site generator emits flat files: /faq is served from faq.html. Without
+// the opt-in those documents match nothing and pass through unverified; with it they
+// are checked like any other asset. It stays opt-in because a host with an SPA
+// fallback answers /faq with index.html, and applying the rule there would compare
+// the wrong bytes and block a healthy deploy.
+const flatAssets = [
+  { path: '/faq.html', sha256: 'ff', sha384: 'gg', size: 7, content_type: 'text/html' },
+  { path: '/index.html', sha256: 'ii', sha384: 'jj', size: 5, content_type: 'text/html' },
+];
+const flatOff = { scope: { include: ['/'], exclude: [] }, assets: flatAssets };
+const flatOn = { scope: { include: ['/'], exclude: [], html_extension: true }, assets: flatAssets };
+const navIn = (manifest, url, destination = 'document') =>
+  decideRequest({ url, origin: ORIGIN, destination, manifestState: 'VALID', manifest });
+
+check(
+  'off by default: /faq is not resolved against faq.html',
+  navIn(flatOff, `${ORIGIN}/faq`).outcome === 'PASSTHROUGH',
+);
+check(
+  'opt-in resolves /faq to the signed faq.html',
+  navIn(flatOn, `${ORIGIN}/faq`).outcome === 'CHECK' &&
+    navIn(flatOn, `${ORIGIN}/faq`).entry.path === '/faq.html',
+);
+check(
+  'the fallback is for navigations only, never subresources',
+  navIn(flatOn, `${ORIGIN}/faq`, 'script').outcome === 'BLOCK_UNMANIFESTED',
+);
+check(
+  'an exact match still wins over the fallback',
+  navIn(flatOn, `${ORIGIN}/index.html`).entry.path === '/index.html',
+);
+check(
+  'the fallback is not recursive: /a does not become /a/index.html',
+  navIn(
+    { scope: { include: ['/'], exclude: [], html_extension: true }, assets: [{ path: '/a/index.html', sha256: 'x', sha384: 'y', size: 1, content_type: 'text/html' }] },
+    `${ORIGIN}/a`,
+  ).outcome === 'PASSTHROUGH',
+);
+check(
+  'a manifest with no scope object is treated as opt-out',
+  decideRequest({ url: `${ORIGIN}/faq`, origin: ORIGIN, destination: 'document', manifestState: 'VALID', manifest: { assets: flatAssets } })
+    .outcome === 'PASSTHROUGH',
+);
+
 console.log('\nhard manifest states block everything in scope');
 for (const state of ['TAMPERED', 'ROLLBACK', 'UNTRUSTED_ROOT', 'UNSUPPORTED']) {
   check(

@@ -328,3 +328,23 @@ fn scan_rejects_symlinks() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }
+
+// ------------------------------------------------------------------ SPEC §7.1.1
+#[test]
+fn scope_html_extension_defaults_to_off_and_round_trips() {
+    use veil_guard::manifest::Scope;
+
+    // Absent in the JSON means off. A verifier that reads an older manifest must not
+    // start resolving `/faq` against `/faq.html` on its own initiative.
+    let legacy: Scope = serde_json::from_str(r#"{"include":["/"],"exclude":[]}"#).unwrap();
+    assert!(!legacy.html_extension);
+
+    let opted_in: Scope =
+        serde_json::from_str(r#"{"include":["/"],"exclude":[],"html_extension":true}"#).unwrap();
+    assert!(opted_in.html_extension);
+
+    // The manifest is signed as bytes, so the field has to survive a round trip
+    // exactly as written.
+    let back = serde_json::to_string(&opted_in).unwrap();
+    assert!(back.contains(r#""html_extension":true"#));
+}

@@ -113,7 +113,7 @@ export function decideRequest({ url, origin, destination, manifestState, manifes
   // `redirect: 'error'` (SPEC §7.2).
   const isNavigation = destination === 'document';
 
-  const entry = resolveEntry(manifest, key);
+  const entry = resolveEntry(manifest, key, isNavigation);
   if (!entry) {
     // Subresources are an allowlist: anything not signed is refused.
     if (!isNavigation) return { outcome: 'BLOCK_UNMANIFESTED', reason: 'not-in-manifest', key };

@@ -307,11 +307,18 @@ export function requestKey(rawPathname) {
 /// A directory-style URL is served from its index document by essentially every
 /// static host, and the manifest lists files, so `/blog/` has to be looked up as
 /// `/blog/index.html`. Without this the worker rejects a site's own home page.
-export function resolveEntry(manifest, key) {
+/// SPEC §7.1.1. `isNavigation` gates the `.html` fallback, which is itself gated on
+/// the signer having set `scope.html_extension` — a subresource never gets it, since
+/// a `<script src="/faq">` that silently resolved to `/faq.html` would be the worker
+/// inventing a mapping the server never agreed to.
+export function resolveEntry(manifest, key, isNavigation = false) {
   const direct = manifest.assets.find((a) => a.path === key);
   if (direct) return direct;
   if (key.endsWith('/')) {
     return manifest.assets.find((a) => a.path === key + 'index.html') ?? null;
+  }
+  if (isNavigation && manifest.scope?.html_extension === true) {
+    return manifest.assets.find((a) => a.path === key + '.html') ?? null;
   }
   return null;
 }

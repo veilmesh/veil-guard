@@ -70,6 +70,13 @@ pub struct Scope {
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// SPEC §7.1.1 step 3: resolve an extensionless navigation against `<key>.html`.
+    ///
+    /// Off unless the signer says otherwise, because only they know whether the host
+    /// serves `/faq` from `faq.html` or from an SPA fallback — and under a fallback
+    /// this rule would compare the wrong file and call a healthy deploy tampered.
+    #[serde(default)]
+    pub html_extension: bool,
 }
 
 /// SPEC §12: unknown members outside `trust_root` are ignored, so additive fields

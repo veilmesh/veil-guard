@@ -82,6 +82,7 @@ fn build_signed_fixture(name: &str) -> Fixture {
         scope: Scope {
             include: vec!["/".into()],
             exclude: vec![],
+            html_extension: false,
         },
         source: serde_json::json!({}),
         assets: assets

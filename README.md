@@ -140,6 +140,13 @@ npm run build && veil-guard sign --dist ./dist --trust-root trust-root.json --ke
 `Integrity-Policy`. Add `--enforce-headers` only once `audit` reports no
 missing-integrity findings.
 
+If your generator emits flat files — `/faq` served from `faq.html`, which is what
+vite-ssg, Astro and Hugo do by default — add `--navigation-html-fallback`. Without it
+those documents match no manifest entry and the worker passes them through
+unverified. Check first that the host really maps `/faq` to `faq.html`: under a
+single-page-app fallback it answers with `index.html` instead, and the worker would
+compare those bytes against `faq.html` and block a healthy deployment (SPEC §7.1.1).
+
 Inline scripts are hashed from the built page, but a host that an inline bootstrap
 goes on to *inject* from appears nowhere in `dist` and has to be named, or the
 generated policy will block it. A tag manager is exactly this shape:

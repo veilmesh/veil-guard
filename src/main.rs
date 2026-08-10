@@ -91,6 +91,17 @@ enum Commands {
         /// Recorded in the manifest as a claim by the signer, not as proof
         #[arg(long)]
         source_commit: Option<String>,
+        /// Let the worker resolve `/faq` against the signed `/faq.html` (SPEC §7.1.1).
+        ///
+        /// Without this, a navigation to a path with no file of that exact name
+        /// matches nothing and is passed through unverified — which is most pages of
+        /// a static site generator that emits flat `.html` files. Turn it on only if
+        /// the host really does serve `/faq` from `faq.html`: under a single-page-app
+        /// fallback the host answers with `index.html`, and the worker would then
+        /// compare those bytes against `faq.html` and block a healthy deployment.
+        #[arg(long)]
+        navigation_html_fallback: bool,
+
         /// Extra `script-src` source to allow, beyond `'self'` and this page's own
         /// inline-script hashes; repeat per source.
         ///
@@ -361,6 +372,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             headers_out,
             enforce_headers,
             source_commit,
+            navigation_html_fallback,
             csp_sources,
             excludes,
         } => {
@@ -451,6 +463,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 scope: Scope {
                     include: vec!["/".into()],
                     exclude: excludes.clone(),
+                    html_extension: navigation_html_fallback,
                 },
                 source: serde_json::json!({
                     "commit": source_commit.unwrap_or_default(),
