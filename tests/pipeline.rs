@@ -349,59 +349,297 @@ fn scope_html_extension_defaults_to_off_and_round_trips() {
     assert!(back.contains(r#""html_extension":true"#));
 }
 
-#[test]
-fn sign_with_provenance_json_embeds_slsa_block() {
-    use serde_json::json;
+// ------------------------------------------------------------------ CLI, end to end
+//
+// These drive the compiled binary. The point is not to re-check logic the unit
+// tests already cover, but to catch the class of bug where a flag is parsed and
+// then quietly ignored — which no test that reimplements the behaviour can see.
+
+mod cli {
     use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
 
-    let tmp = std::env::temp_dir().join(format!("vg-test-prov-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).unwrap();
+    const BIN: &str = env!("CARGO_BIN_EXE_veil-guard");
 
-    let prov_json_path = tmp.join("prov.json");
-    let prov_content = json!({
-        "builder": {
-            "id": "https://github.com/veilmesh/veil-guard-action@v1"
-        },
-        "build_type": "https://slsa.dev/provenance/v1",
-        "invocation": {
-            "config_source": {
-                "uri": "git+https://github.com/example/app",
-                "digest": {
-                    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                },
-                "entry_point": ".github/workflows/deploy.yml"
-            }
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vg-cli-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run(args: &[&str]) -> Output {
+        Command::new(BIN).args(args).output().expect("binary runs")
+    }
+
+    fn ok(args: &[&str]) -> String {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "`veil-guard {}` failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A two-signer build directory with one asset, ready to sign.
+    fn fixture(dir: &Path) -> (PathBuf, Vec<PathBuf>) {
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("app.js"), b"export const x = 1;\n").unwrap();
+
+        let keys = dir.join("keys");
+        for n in ["a", "b"] {
+            ok(&["keygen", "--out-dir", keys.to_str().unwrap(), "--name", n]);
         }
-    });
-    fs::write(
-        &prov_json_path,
-        serde_json::to_string_pretty(&prov_content).unwrap(),
-    )
-    .unwrap();
+        let trust_root = dir.join("trust-root.json");
+        ok(&[
+            "trust-root",
+            "--key",
+            keys.join("a.pub.json").to_str().unwrap(),
+            "--key",
+            keys.join("b.pub.json").to_str().unwrap(),
+            "--threshold",
+            "2",
+            "--out",
+            trust_root.to_str().unwrap(),
+        ]);
+        (
+            trust_root,
+            vec![keys.join("a.key.json"), keys.join("b.key.json")],
+        )
+    }
 
-    let mut source_val = json!({
-        "commit": "abc123commit",
-        "toolchain": { "veil_guard": "0.1.0" },
-    });
+    #[test]
+    fn provenance_json_reaches_the_signed_manifest() {
+        let dir = tmpdir("prov");
+        let (trust_root, keys) = fixture(&dir);
+        let prov = dir.join("prov.json");
+        fs::write(
+            &prov,
+            br#"{"builder":{"id":"https://example/runs/1"},"build_type":"https://slsa.dev/provenance/v1"}"#,
+        )
+        .unwrap();
 
-    let prov_bytes = fs::read(&prov_json_path).unwrap();
-    let prov: serde_json::Value = serde_json::from_slice(&prov_bytes).unwrap();
-    if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object()) {
-        obj.insert(
-            "slsa_provenance".into(),
-            serde_json::Value::Object(prov_obj.clone()),
+        ok(&[
+            "sign",
+            "--dist",
+            dir.join("dist").to_str().unwrap(),
+            "--trust-root",
+            trust_root.to_str().unwrap(),
+            "--key",
+            keys[0].to_str().unwrap(),
+            "--key",
+            keys[1].to_str().unwrap(),
+            "--source-commit",
+            "deadbeef",
+            "--provenance-json",
+            prov.to_str().unwrap(),
+        ]);
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("dist/veil-guard-manifest.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            manifest["source"]["slsa_provenance"]["builder"]["id"], "https://example/runs/1",
+            "the file's contents must land under source.slsa_provenance"
+        );
+        // The two fields that were there before must survive the merge.
+        assert_eq!(manifest["source"]["commit"], "deadbeef");
+        assert!(manifest["source"]["toolchain"]["veil_guard"].is_string());
+
+        // And the result must still verify: `source` is inside the signed bytes.
+        ok(&[
+            "verify",
+            "--dist",
+            dir.join("dist").to_str().unwrap(),
+            "--trust-root",
+            trust_root.to_str().unwrap(),
+        ]);
+    }
+
+    #[test]
+    fn oversized_provenance_is_refused() {
+        let dir = tmpdir("provbig");
+        let (trust_root, keys) = fixture(&dir);
+        let prov = dir.join("prov.json");
+        // Every client re-fetches the manifest on every cold start, so this is a
+        // hard limit rather than a warning.
+        let filler = "x".repeat(32 * 1024);
+        fs::write(&prov, format!(r#"{{"note":"{filler}"}}"#)).unwrap();
+
+        let out = run(&[
+            "sign",
+            "--dist",
+            dir.join("dist").to_str().unwrap(),
+            "--trust-root",
+            trust_root.to_str().unwrap(),
+            "--key",
+            keys[0].to_str().unwrap(),
+            "--key",
+            keys[1].to_str().unwrap(),
+            "--provenance-json",
+            prov.to_str().unwrap(),
+        ]);
+        assert!(
+            !out.status.success(),
+            "an oversized file must stop the build"
+        );
+        let msg = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            msg.contains("the limit is"),
+            "the error should name the limit, got: {msg}"
         );
     }
 
-    assert_eq!(
-        source_val["slsa_provenance"]["builder"]["id"],
-        "https://github.com/veilmesh/veil-guard-action@v1"
-    );
-    assert_eq!(
-        source_val["slsa_provenance"]["invocation"]["config_source"]["entry_point"],
-        ".github/workflows/deploy.yml"
-    );
+    #[test]
+    fn keygen_builds_a_kms_backed_signer() {
+        use p256::pkcs8::EncodePublicKey as _;
 
-    let _ = fs::remove_dir_all(&tmp);
+        let dir = tmpdir("kmskey");
+        // Stand in for `aws kms get-public-key`: a P-256 public key as DER SPKI.
+        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
+        let der = secret.public_key().to_public_key_der().unwrap();
+        let der_path = dir.join("p256.der");
+        fs::write(&der_path, der.as_bytes()).unwrap();
+
+        let arn = "arn:aws:kms:eu-west-1:000000000000:key/abc";
+        ok(&[
+            "keygen",
+            "--out-dir",
+            dir.join("keys").to_str().unwrap(),
+            "--name",
+            "remote",
+            "--p256-public-der",
+            der_path.to_str().unwrap(),
+            "--kms-key-id",
+            arn,
+        ]);
+
+        let kf: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("keys/remote.key.json")).unwrap()).unwrap();
+
+        assert!(
+            kf.get("p256_private_pkcs8").is_none(),
+            "the whole point is that no P-256 private key is written"
+        );
+        assert_eq!(
+            kf["kms_key_id"], arn,
+            "the signer must remember its own key"
+        );
+        assert!(kf["ed25519_seed"].is_string(), "the Ed25519 half is local");
+
+        // SPEC §4.2: key_id is a hash over both public keys, so the imported
+        // P-256 point must be the uncompressed SEC1 form, not the SPKI wrapper.
+        let p256_hex = kf["p256_public"].as_str().unwrap();
+        assert_eq!(p256_hex.len(), 130, "65 bytes of uncompressed SEC1");
+        assert!(p256_hex.starts_with("04"));
+
+        let ed: [u8; 32] =
+            veil_guard::crypto::unhex_array(kf["ed25519_public"].as_str().unwrap()).unwrap();
+        let p: [u8; 65] = veil_guard::crypto::unhex_array(p256_hex).unwrap();
+        assert_eq!(
+            kf["key_id"].as_str().unwrap(),
+            hex::encode(veil_guard::crypto::key_id(&ed, &p))
+        );
+    }
+
+    #[test]
+    fn a_kms_signer_reaches_the_kms_path_without_a_command_line_flag() {
+        use p256::pkcs8::EncodePublicKey as _;
+
+        let dir = tmpdir("kmssign");
+        let (_, _) = fixture(&dir);
+
+        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
+        let der_path = dir.join("p256.der");
+        fs::write(
+            &der_path,
+            secret.public_key().to_public_key_der().unwrap().as_bytes(),
+        )
+        .unwrap();
+        ok(&[
+            "keygen",
+            "--out-dir",
+            dir.join("keys").to_str().unwrap(),
+            "--name",
+            "remote",
+            "--p256-public-der",
+            der_path.to_str().unwrap(),
+            "--kms-key-id",
+            "arn:aws:kms:eu-west-1:000000000000:key/abc",
+        ]);
+
+        let root = dir.join("tr-remote.json");
+        ok(&[
+            "trust-root",
+            "--key",
+            dir.join("keys/a.pub.json").to_str().unwrap(),
+            "--key",
+            dir.join("keys/remote.pub.json").to_str().unwrap(),
+            "--threshold",
+            "2",
+            "--out",
+            root.to_str().unwrap(),
+        ]);
+
+        // No --kms-key-id on the command line. The signer carries its own, which is
+        // what makes a threshold of remote signers possible at all.
+        //
+        // Bogus credentials with IMDS off: without them the SDK walks its whole
+        // provider chain and waits on 169.254.169.254, which turns a fast assertion
+        // into a slow one.
+        let out = Command::new(BIN)
+            .args([
+                "sign",
+                "--dist",
+                dir.join("dist").to_str().unwrap(),
+                "--trust-root",
+                root.to_str().unwrap(),
+                "--key",
+                dir.join("keys/a.key.json").to_str().unwrap(),
+                "--key",
+                dir.join("keys/remote.key.json").to_str().unwrap(),
+            ])
+            .env("AWS_REGION", "eu-west-1")
+            .env("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+            .env(
+                "AWS_SECRET_ACCESS_KEY",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .output()
+            .expect("binary runs");
+
+        let msg = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+
+        // The claim under test: the run got past key selection and into the KMS
+        // branch using only what the key file said.
+        assert!(
+            !msg.contains("no P-256 private key") && !msg.contains("no KMS key to sign with"),
+            "it stopped before reaching the KMS branch: {msg}"
+        );
+
+        // Where it stops after that depends on how this binary was built, and both
+        // outcomes prove the same thing.
+        if cfg!(feature = "kms") {
+            assert!(
+                msg.contains("KMS request failed"),
+                "expected a KMS call to have been attempted, got: {msg}"
+            );
+        } else {
+            assert!(
+                msg.contains("KMS support is disabled"),
+                "expected the disabled-feature diagnostic, got: {msg}"
+            );
+        }
+    }
 }

@@ -136,6 +136,24 @@ ID (SPEC §4.1). Each `keygen` writes `<name>.key.json` (private, mode 0600,
 A `recovery` key exists to survive the compromise of a build machine, so it must
 never be stored on one.
 
+To keep a signer's P-256 half in a cloud KMS instead, import its public key. Both
+clouds hand back DER SubjectPublicKeyInfo; `keygen` converts it to the uncompressed
+SEC1 point the trust root needs, generates the Ed25519 half locally, and records the
+KMS key **in the signer's own file** — so a threshold can have several remote
+signers, each with its own key:
+
+```bash
+aws kms get-public-key --key-id "$ARN" --query PublicKey --output text | base64 -d > p256.der
+```
+
+```bash
+veil-guard keygen --out-dir .keys --name ci-1 --p256-public-der p256.der --kms-key-id "$ARN"
+```
+
+`sign` then needs no KMS arguments at all — each key file says where its half lives.
+This is half a measure and the tool says so: the Ed25519 seed is still on disk. See
+SPEC §4.6 for what is and is not achieved.
+
 ```bash
 veil-guard keygen --out-dir .keys --name alice
 ```

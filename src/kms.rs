@@ -90,9 +90,45 @@ pub fn sign_with_kms(
             "aws"
         }
     });
-    match provider {
+    let result = match provider {
         "aws" => sign_aws_kms(msg, kms_key_id),
         "gcp" => sign_gcp_kms(msg, kms_key_id),
-        _ => Err(format!("unknown KMS provider: {provider}").into()),
+        _ => return Err(format!("unknown KMS provider: {provider}").into()),
+    };
+
+    // The SDKs' errors Debug-print their entire response, headers and all — several
+    // hundred lines for "your credentials are wrong". The useful sentence lives
+    // further down the source chain than the outermost Display, so walk it.
+    result.map_err(|e| {
+        format!(
+            "KMS request failed ({provider}, key {kms_key_id}): {}",
+            error_chain(e.as_ref())
+        )
+        .into()
+    })
+}
+
+/// Every distinct message in an error's source chain, outermost first.
+///
+/// Bounded on both counts: a transport error can nest a dozen layers deep, and a
+/// CLI diagnostic that scrolls off the screen is one nobody reads.
+fn error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = Some(err);
+    while let Some(e) = current {
+        let msg = e.to_string();
+        // Adjacent layers routinely stringify identically.
+        if !msg.is_empty() && parts.last() != Some(&msg) {
+            parts.push(msg);
+        }
+        if parts.len() == 4 {
+            break;
+        }
+        current = e.source();
+    }
+    let joined = parts.join(": ");
+    match joined.char_indices().nth(300) {
+        Some((cut, _)) => format!("{}…", &joined[..cut]),
+        None => joined,
     }
 }

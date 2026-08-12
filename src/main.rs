@@ -45,6 +45,29 @@ enum Commands {
         /// Advisory role: a `recovery` key must never live on a build machine
         #[arg(short, long, default_value = "build", value_parser = ["build", "recovery"])]
         role: String,
+
+        /// Build a signer whose P-256 half stays in a KMS (SPEC §4.6).
+        ///
+        /// Takes the public key as DER SubjectPublicKeyInfo — what both clouds
+        /// hand back. No P-256 private key is written, and `sign` will delegate
+        /// this signer's P-256 signature to `--kms-key-id`, which becomes
+        /// required alongside this flag.
+        ///
+        ///   aws kms get-public-key --key-id "$ARN" \
+        ///     --query PublicKey --output text | base64 -d > p256.der
+        ///
+        ///   gcloud kms keys versions get-public-key 1 --key … --output-file p256.pem
+        ///   openssl ec -pubin -in p256.pem -outform DER -out p256.der
+        #[arg(long, value_name = "PATH")]
+        p256_public_der: Option<PathBuf>,
+
+        /// KMS key this signer's P-256 half lives in; recorded in the key file
+        #[arg(long, requires = "p256_public_der")]
+        kms_key_id: Option<String>,
+
+        /// Provider for `--kms-key-id`; inferred from the key ID when omitted
+        #[arg(long, value_parser = ["aws", "gcp"], requires = "kms_key_id")]
+        kms_provider: Option<String>,
     },
 
     /// Assemble a trust root from signer key files
@@ -234,6 +257,16 @@ struct KeyFile {
     ed25519_seed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     p256_private_pkcs8: Option<String>,
+    /// Where this signer's P-256 half lives, when it is not in this file.
+    ///
+    /// Recorded per signer rather than passed on the command line, because a
+    /// threshold needs several signers and each has its own key in the service.
+    /// A single global `--kms-key-id` would sign every remote signer's entry with
+    /// one key, producing a bundle that fails its own verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kms_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kms_provider: Option<String>,
 }
 
 impl Drop for KeyFile {
@@ -307,6 +340,18 @@ impl KeyFile {
         });
 
         // 2. P-256 signature
+        //
+        // Both at once is a hand-edited file, and it would sign locally while its
+        // author believed the key never left the KMS. Refuse rather than pick.
+        if self.p256_private_pkcs8.is_some() && self.kms_key_id.is_some() {
+            return Err(format!(
+                "signer {} has both a local P-256 private key and a kms_key_id; \
+                 remove one — as written, the local key would be used and the KMS ignored",
+                self.key_id
+            )
+            .into());
+        }
+
         if let Some(pkcs8_hex) = &self.p256_private_pkcs8 {
             use p256::pkcs8::DecodePrivateKey as _;
             let pkcs8_bytes = veil_guard::crypto::unhex(pkcs8_hex)?;
@@ -317,21 +362,63 @@ impl KeyFile {
                 alg_id: SigAlg::P256.alg_id(),
                 sig: p_sig.to_bytes().to_vec(),
             });
-        } else if let Some(kms_id) = kms_key_id {
-            let sig_bytes = sign_with_kms(&msg, kms_id, kms_provider)?;
+        } else {
+            // The key file wins over the command line. With several remote signers
+            // there is one KMS key each, and a single global flag could only ever
+            // be right for one of them.
+            let kms_id = self.kms_key_id.as_deref().or(kms_key_id).ok_or_else(|| {
+                format!(
+                    "signer {} has no P-256 private key and no KMS key to sign with. \
+                         Regenerate it with `keygen --p256-public-der … --kms-key-id …`, \
+                         or pass --kms-key-id for this one signer.",
+                    self.key_id
+                )
+            })?;
+            let provider = self.kms_provider.as_deref().or(kms_provider);
+            let sig_bytes = sign_with_kms(&msg, kms_id, provider)?;
             entries.push(SigEntry {
                 key_id: key_id_bytes,
                 alg_id: SigAlg::P256.alg_id(),
                 sig: sig_bytes,
             });
-        } else {
-            return Err(
-                "key file has no P-256 private key and no --kms-key-id was supplied".into(),
-            );
         }
 
         Ok(entries)
     }
+}
+
+/// Read a P-256 public key from a DER SubjectPublicKeyInfo file.
+///
+/// SPKI is what `aws kms get-public-key` and `gcloud kms … get-public-key` return,
+/// and it is not what goes into a trust root: SPEC §2.1 wants the 65-byte
+/// uncompressed SEC1 point, and rejects everything else. Converting here means the
+/// operator never has to.
+fn read_p256_public_der(path: &Path) -> Result<[u8; 65], Box<dyn std::error::Error>> {
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    use p256::pkcs8::DecodePublicKey as _;
+
+    let bytes = fs::read(path)?;
+    if bytes.starts_with(b"-----BEGIN") {
+        return Err(format!(
+            "{} is PEM, not DER. Convert it first:\n  \
+             openssl ec -pubin -in {} -outform DER -out p256.der",
+            path.display(),
+            path.display()
+        )
+        .into());
+    }
+
+    let key = p256::PublicKey::from_public_key_der(&bytes).map_err(|e| {
+        format!(
+            "{} is not a P-256 SubjectPublicKeyInfo: {e}",
+            path.display()
+        )
+    })?;
+    let point = key.to_encoded_point(false);
+    point
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "public key did not encode to a 65-byte uncompressed point".into())
 }
 
 fn sign_with_kms(
@@ -380,17 +467,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             out_dir,
             name,
             role,
+            p256_public_der,
+            kms_key_id,
+            kms_provider,
         } => {
             fs::create_dir_all(&out_dir)?;
+
+            // Two shapes of signer. Both have an Ed25519 keypair generated here;
+            // they differ in whether the P-256 private half exists locally at all.
             let signer = SignerKeys::generate();
-            let kf = KeyFile {
-                spec: "veil-guard/key/1".into(),
-                role: role.clone(),
-                key_id: hex::encode(signer.key_id()),
-                ed25519_public: hex::encode(signer.ed25519_public()),
-                p256_public: hex::encode(signer.p256_public()),
-                ed25519_seed: Some(hex::encode(signer.ed25519_seed())),
-                p256_private_pkcs8: Some(hex::encode(signer.p256_pkcs8_der()?)),
+            let kf = match &p256_public_der {
+                None => KeyFile {
+                    spec: "veil-guard/key/1".into(),
+                    role: role.clone(),
+                    key_id: hex::encode(signer.key_id()),
+                    ed25519_public: hex::encode(signer.ed25519_public()),
+                    p256_public: hex::encode(signer.p256_public()),
+                    ed25519_seed: Some(hex::encode(signer.ed25519_seed())),
+                    p256_private_pkcs8: Some(hex::encode(signer.p256_pkcs8_der()?)),
+                    kms_key_id: None,
+                    kms_provider: None,
+                },
+                Some(der_path) => {
+                    let kms_key_id = kms_key_id
+                        .clone()
+                        .ok_or("--p256-public-der needs --kms-key-id: without it nothing can sign this signer's P-256 half")?;
+                    let p256_public = read_p256_public_der(der_path)?;
+                    let ed_public = signer.ed25519_public();
+                    KeyFile {
+                        spec: "veil-guard/key/1".into(),
+                        role: role.clone(),
+                        key_id: hex::encode(veil_guard::crypto::key_id(&ed_public, &p256_public)),
+                        ed25519_public: hex::encode(ed_public),
+                        p256_public: hex::encode(p256_public),
+                        ed25519_seed: Some(hex::encode(signer.ed25519_seed())),
+                        p256_private_pkcs8: None,
+                        kms_key_id: Some(kms_key_id),
+                        kms_provider: kms_provider.clone(),
+                    }
+                }
             };
 
             let priv_path = out_dir.join(format!("{name}.key.json"));
@@ -406,13 +521,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 p256_public: kf.p256_public.clone(),
                 ed25519_seed: None,
                 p256_private_pkcs8: None,
+                // Not secret, and the trust root is assembled from these files —
+                // carrying it through keeps a remote signer recognisable there.
+                kms_key_id: kf.kms_key_id.clone(),
+                kms_provider: kf.kms_provider.clone(),
             };
             let pub_path = out_dir.join(format!("{name}.pub.json"));
             fs::write(&pub_path, serde_json::to_string_pretty(&pub_kf)? + "\n")?;
 
             println!("signer   {}  ({role})", pub_kf.key_id);
-            println!("private  {}  (mode 0600, UNENCRYPTED)", priv_path.display());
+            match &kf.kms_key_id {
+                Some(id) => {
+                    println!("p256     remote — {id}");
+                    println!(
+                        "private  {}  (mode 0600, Ed25519 seed only, UNENCRYPTED)",
+                        priv_path.display()
+                    );
+                }
+                None => println!("private  {}  (mode 0600, UNENCRYPTED)", priv_path.display()),
+            }
             println!("public   {}", pub_path.display());
+            if kf.kms_key_id.is_some() {
+                println!("\nThe P-256 half of this signer never existed on this machine. The");
+                println!("Ed25519 half did, and still sits in the file above — SPEC.md §4.6");
+                println!("calls that partial custody, not the finished article.");
+            }
             if role == "recovery" {
                 println!("\nThis is a recovery key, and it has just been written to this disk");
                 println!("unencrypted. SPEC.md §4.6 says it MUST NOT stay there: its whole");
@@ -551,14 +684,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(prov_path) = &provenance_json {
                 let prov_bytes = fs::read(prov_path)?;
+
+                // The manifest is re-fetched by every Service Worker on every cold
+                // start with `cache: 'no-store'`, so anything embedded here is paid
+                // for on the critical path of every visit. Provenance is metadata,
+                // not payload; a cap keeps a runaway CI variable from turning the
+                // control plane into a download.
+                const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
+                if prov_bytes.len() > MAX_PROVENANCE_BYTES {
+                    return Err(format!(
+                        "{} is {} bytes; the limit is {MAX_PROVENANCE_BYTES}. \
+                         The manifest is fetched by every client on every cold start.",
+                        prov_path.display(),
+                        prov_bytes.len()
+                    )
+                    .into());
+                }
+
                 let prov: serde_json::Value = serde_json::from_slice(&prov_bytes)?;
-                if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object())
-                {
-                    obj.insert(
+                let prov_obj = prov
+                    .as_object()
+                    .ok_or_else(|| format!("{} must contain a JSON object", prov_path.display()))?;
+                source_val
+                    .as_object_mut()
+                    .expect("source is built as an object above")
+                    .insert(
                         "slsa_provenance".into(),
                         serde_json::Value::Object(prov_obj.clone()),
                     );
-                }
             }
 
             let manifest = Manifest {

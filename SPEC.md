@@ -216,11 +216,31 @@ P-256 halves in a cloud KMS, their Ed25519 halves in a service that signs Ed2551
 (HashiCorp Vault's transit engine, or a PKCS#11 HSM), and the `recovery` signer
 offline on hardware that never touches CI.
 
-**Until that exists**, `veil-guard keygen` writes both private halves to disk
-unencrypted at mode 0600. That is adequate for a build key on a machine you already
-trust with the build, and inadequate for anything else. A `recovery` key **MUST NOT**
-be stored this way: its entire purpose is to survive the compromise of the machines
-that hold the build keys, which it cannot do while sitting next to them.
+**Where the implementation stands.** Two custody modes exist today, and neither is
+the full picture above:
+
+| Mode | Ed25519 | P-256 |
+|---|---|---|
+| `keygen` | seed on disk, mode 0600, unencrypted | PKCS#8 on disk, same file |
+| `keygen --p256-public-der … --kms-key-id …` | seed on disk, mode 0600, unencrypted | in the KMS; only the public point is stored |
+
+The second mode moves half the custody and no more. The Ed25519 seed is still
+readable by the build process, so a compromised runner holding two such key files
+can still reach the threshold — the property §4.6 asks for is **not** met by either
+row. Closing it needs an Ed25519 signer that is also remote; that work is tracked in
+`ROADMAP.md` phase 3.
+
+Which KMS key a signer uses is recorded **in that signer's key file**, not passed on
+the command line. A threshold needs several signers, each with its own key in the
+service; one global argument could only ever be correct for one of them, and would
+otherwise sign every remote signer's entry with the same key — producing a bundle
+that fails its own verification. A key file **MUST NOT** carry both a local P-256
+private key and a KMS key reference: an implementation that silently preferred one
+would sign locally while its operator believed the key never left the service.
+
+A `recovery` key **MUST NOT** be stored in either mode: its entire purpose is to
+survive the compromise of the machines that hold the build keys, which it cannot do
+while sitting next to them.
 
 ---
 
