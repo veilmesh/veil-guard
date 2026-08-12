@@ -11,9 +11,9 @@ pub mod auditor;
 pub mod crypto;
 pub mod generators;
 pub mod html;
+#[cfg(feature = "kms")]
+pub mod kms;
 pub mod manifest;
 pub mod paths;
 pub mod runtime;
 pub mod scanner;
-#[cfg(feature = "kms")]
-pub mod kms;

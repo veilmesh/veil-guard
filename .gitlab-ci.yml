@@ -32,11 +32,16 @@ lint:
   stage: check
   script:
     - cargo fmt --all --check
-    # The auditor is behind a feature flag, so both shapes of the crate need
-    # linting: the default build must stay free of network code, and the audit
-    # build must still compile clean.
+    # Every shape of the crate needs linting. The default build must stay free of
+    # network code; the audit build must still compile clean; and `kms` pulls in
+    # the cloud SDKs, which nothing else would catch.
+    #
+    # `--all-targets` compiles the test targets too, so this is also the only
+    # coverage the KMS code gets: its two functions talk to AWS and GCP and cannot
+    # be exercised without credentials. Compile-and-lint is the honest ceiling here.
     - cargo clippy --all-targets -- -D warnings
     - cargo clippy --all-targets --features audit -- -D warnings
+    - cargo clippy --all-targets --features audit,kms -- -D warnings
 
 test:rust:
   extends: .rust

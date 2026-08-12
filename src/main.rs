@@ -13,8 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use veil_guard::crypto::{
-    build_bundle, SigAlg, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST, PREFIX_ROTATION,
-    SUPPORTED_ALGS, SigEntry,
+    build_bundle, SigAlg, SigEntry, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST,
+    PREFIX_ROTATION, SUPPORTED_ALGS,
 };
 use veil_guard::manifest::{
     verify_manifest, verify_rotation, AssetEntry, Manifest, ManifestState, RotationStatement,
@@ -325,7 +325,9 @@ impl KeyFile {
                 sig: sig_bytes,
             });
         } else {
-            return Err("key file has no P-256 private key and no --kms-key-id was supplied".into());
+            return Err(
+                "key file has no P-256 private key and no --kms-key-id was supplied".into(),
+            );
         }
 
         Ok(entries)
@@ -339,7 +341,7 @@ fn sign_with_kms(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     #[cfg(feature = "kms")]
     {
-        Ok(veil_guard::kms::sign_with_kms(_msg, _kms_key_id, _kms_provider)?)
+        veil_guard::kms::sign_with_kms(_msg, _kms_key_id, _kms_provider)
     }
     #[cfg(not(feature = "kms"))]
     {
@@ -550,8 +552,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(prov_path) = &provenance_json {
                 let prov_bytes = fs::read(prov_path)?;
                 let prov: serde_json::Value = serde_json::from_slice(&prov_bytes)?;
-                if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object()) {
-                    obj.insert("slsa_provenance".into(), serde_json::Value::Object(prov_obj.clone()));
+                if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object())
+                {
+                    obj.insert(
+                        "slsa_provenance".into(),
+                        serde_json::Value::Object(prov_obj.clone()),
+                    );
                 }
             }
 
@@ -583,10 +589,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = (serde_json::to_string_pretty(&manifest)? + "\n").into_bytes();
             let mut entries = Vec::new();
             for path in &keys {
-                entries.extend(
-                    read_key_file(path)?
-                        .sign(PREFIX_MANIFEST, &payload, kms_key_id.as_deref(), kms_provider.as_deref())?,
-                );
+                entries.extend(read_key_file(path)?.sign(
+                    PREFIX_MANIFEST,
+                    &payload,
+                    kms_key_id.as_deref(),
+                    kms_provider.as_deref(),
+                )?);
             }
             let bundle = build_bundle(&entries);
 

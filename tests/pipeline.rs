@@ -351,8 +351,8 @@ fn scope_html_extension_defaults_to_off_and_round_trips() {
 
 #[test]
 fn sign_with_provenance_json_embeds_slsa_block() {
-    use std::fs;
     use serde_json::json;
+    use std::fs;
 
     let tmp = std::env::temp_dir().join(format!("vg-test-prov-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
@@ -374,7 +374,11 @@ fn sign_with_provenance_json_embeds_slsa_block() {
             }
         }
     });
-    fs::write(&prov_json_path, serde_json::to_string_pretty(&prov_content).unwrap()).unwrap();
+    fs::write(
+        &prov_json_path,
+        serde_json::to_string_pretty(&prov_content).unwrap(),
+    )
+    .unwrap();
 
     let mut source_val = json!({
         "commit": "abc123commit",
@@ -384,7 +388,10 @@ fn sign_with_provenance_json_embeds_slsa_block() {
     let prov_bytes = fs::read(&prov_json_path).unwrap();
     let prov: serde_json::Value = serde_json::from_slice(&prov_bytes).unwrap();
     if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object()) {
-        obj.insert("slsa_provenance".into(), serde_json::Value::Object(prov_obj.clone()));
+        obj.insert(
+            "slsa_provenance".into(),
+            serde_json::Value::Object(prov_obj.clone()),
+        );
     }
 
     assert_eq!(
