@@ -8,21 +8,43 @@
 
 ## 🛡️ Honest Threat Model & Security Boundaries
 
-`veil-guard` establishes an explicit, audited threat model. It differentiates between **Subresource / CDN Tampering** (handled via SRI & Service Worker) and **Origin Server Compromise** (handled via Out-of-Band CLI Audit, Rekor Transparency, or Extension).
+`veil-guard` distinguishes **Subresource / CDN Tampering** (handled by SRI and the
+Service Worker) from **Origin Server Compromise** (handled, only partially, by the
+out-of-band CLI audit).
 
-| Attack Scenario | Threat Level | Tier 0 (CLI / SRI / CSP / Rekor) | Tier 1 (Service Worker) | Tier 2 (Extension) |
-| :--- | :---: | :---: | :---: | :---: |
-| **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked | ✅ Blocked |
-| **Dynamic Lazy Route / Wasm Chunk Tampering** (import()) | High | ⚠️ Requires SW / Import Map | ✅ Blocked via SW | ✅ Blocked |
-| **Post-First-Visit External Script Injection** | High | ⚠️ Partial (CSP) | ✅ Blocked via SW | ✅ Blocked |
-| **Post-First-Visit Inline Script Injection** | High | ✅ Blocked via CSP Hash / Nonce | ❌ Unseen by SW `fetch` | ✅ Blocked |
-| **Accidental / Corrupted Deploy** | Medium | ✅ Blocked via SRI | ✅ Blocked via SW | ✅ Blocked |
-| **Initial Origin Compromise** (Evil HTML served on 1st visit) | Critical | ⚠️ Detectable via Out-of-Band CLI Audit | ❌ (SW not installed) | ✅ Blocked |
-| **Origin Compromise via Evil `sw.js` Replacement** | Critical | ⚠️ Detectable via Out-of-Band CLI Audit | ❌ (SW replaced) | ✅ Blocked |
-| **Signer Private Key Misuse / Theft** | Critical | ⚠️ Detectable via Rekor & Keyless OIDC | ⚠️ Detectable | ⚠️ Detectable |
-| **Targeted Malicious Delivery** (Selective bad bundle) | Critical | ⚠️ Detectable via Multi-Region `veil-guard diff` | ❌ | ⚠️ Detectable |
+Everything in this table describes code that exists in this repository today. Tier 2,
+transparency-log publication and keyless signing are **not built** — they are tracked
+in [`ROADMAP.md`](./ROADMAP.md) and are deliberately absent from the columns below,
+because a threat model that credits unwritten code is worse than no threat model.
 
-> **Prior Art Acknowledgments:** `veil-guard` draws architectural inspiration from **Meta Code Verify** (WhatsApp Web / Cloudflare) and **WEBCAT** (Freedom of the Press Foundation).
+| Attack Scenario | Threat Level | Tier 0 (CLI / SRI / CSP / audit) | Tier 1 (Service Worker) |
+| :--- | :---: | :---: | :---: |
+| **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked |
+| **Dynamic Lazy Route / Wasm Chunk Tampering** (`import()`) | High | ❌ No SRI to apply | ✅ Blocked via SW |
+| **Post-First-Visit External Script Injection** | High | ⚠️ Partial (CSP) | ✅ Blocked via SW |
+| **Post-First-Visit Inline Script Injection** | High | ✅ Blocked via CSP hash | ❌ Unseen by SW `fetch` |
+| **Accidental / Corrupted Deploy** | Medium | ✅ Blocked via SRI | ✅ Blocked via SW |
+| **Initial Origin Compromise** (evil HTML on 1st visit) | Critical | ⚠️ Detectable after the fact via `audit` | ❌ SW not installed yet |
+| **Origin Compromise via Evil `sw.js` Replacement** | Critical | ⚠️ Detectable after the fact via `audit` | ❌ SW replaced |
+| **Signer Private Key Theft** | Critical | ⚠️ One key is not enough: 2-of-3 threshold (§4.4) | ⚠️ Same |
+| **Threshold of Signer Keys Stolen** | Critical | ❌ Indistinguishable from a legitimate build | ❌ Same |
+| **Targeted Malicious Delivery** (bad bundle to some visitors) | Critical | ⚠️ Detectable via multi-vantage `audit` + `diff` | ❌ |
+
+"Detectable after the fact" means exactly that: the attack succeeds against whoever
+loads the page, and `veil-guard audit` tells you afterwards — if you are running it.
+It is not prevention.
+
+### Not built yet
+
+Named here because they appear in the architecture diagram, the roadmap, and the
+prior art, and their absence changes what the tool protects:
+
+- **Tier 2 browser extension.** The only design that can cover the first visit and a
+  replaced Service Worker. Until it ships, both rows above stay `❌ / ⚠️`.
+- **Transparency log publication (Rekor) and keyless OIDC signing.** Would make a
+  stolen-key signature publicly discoverable. Nothing in this repo talks to a log.
+
+> **Prior Art Acknowledgments:** `veil-guard` draws architectural inspiration from **Meta Code Verify** (WhatsApp Web / Cloudflare) and **WEBCAT** (Freedom of the Press Foundation). Both implement the Tier 2 extension that this project has not built.
 
 ---
 
@@ -36,7 +58,7 @@
 |  1. NFC Unicode & Path Normalization (macOS NFD -> NFC, Windows '\' -> '/')        |
 |  2. Binary Hashing: SHA-256 (Manifest/CSP) & SHA-384 (SRI)                         |
 |  3. Monotonic Build Unix-Timestamp Versioning & Expiry                             |
-|  4. Key Rotation & Revocation: Chain-of-Trust signed statements                    |
+|  4. Key Rotation: Chain-of-Trust signed statements (revocation: SPEC only)         |
 |  5. Dual Signing: Ed25519 (verify_strict) AND ECDSA P-256 (WebCrypto)              |
 |  6. Multi-Page HTML SRI Injection & Per-Page CSP Hash Generators                   |
 |  7. Config Generators: Integrity-Policy & Server Headers (Nginx/Caddy/Netlify)     |
@@ -56,7 +78,7 @@
                                           |
                                           v
 +------------------------------------------------------------------------------------+
-|                      TIER 2: Out-of-Band Browser Extension                         |
+|            TIER 2: Out-of-Band Browser Extension  — NOT BUILT (ROADMAP §3)          |
 +------------------------------------------------------------------------------------+
 ```
 
@@ -184,6 +206,83 @@ one.
 
 ```bash
 veil-guard rotate --from trust-root.json --to trust-root-next.json --key .keys/alice.key.json --key .keys/bob.key.json --out dist/veil-guard-rotation.json
+```
+
+---
+
+## 🤖 CI/CD & Cloud KMS Integrations
+
+We provide first-class integrations to automate manifest signing, build-provenance embedding, and key management inside CI/CD environments.
+
+### 1. Node.js Wrapper (`@veilmesh/veil-guard`)
+A TypeScript/ESModule wrapper over the CLI binary. It automatically detects CI environments (GitHub Actions, GitLab CI) to extract and embed **SLSA Provenance** metadata.
+
+```bash
+npm install --save-dev @veilmesh/veil-guard
+```
+
+```typescript
+import { sign } from '@veilmesh/veil-guard';
+
+await sign({
+  dist: './dist',
+  trustRoot: './trust-root.json',
+  keys: ['.keys/alice.key.json'],
+  // Auto-detects and embeds GITHUB_SHA/CI_COMMIT_SHA + SLSA metadata by default
+  embedProvenance: true, 
+  // KMS Integration (signs P-256 via Cloud HSM, Ed25519 locally)
+  kms: {
+    keyId: 'arn:aws:kms:us-east-1:123456789012:key/my-key-uuid',
+    provider: 'aws',
+  }
+});
+```
+
+### 2. Vite Plugin (`vite-plugin-veil-guard`)
+Automatically hooks into the Rollup `closeBundle` phase to scan and sign the generated build.
+
+```bash
+npm install --save-dev vite-plugin-veil-guard
+```
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { veilGuardPlugin } from 'vite-plugin-veil-guard';
+
+export default defineConfig({
+  plugins: [
+    veilGuardPlugin({
+      trustRootPath: './trust-root.json',
+      keyPath: ['.keys/alice.key.json'], // Local Ed25519 seed key file
+      exclude: ['/api/'],
+      kms: {
+        keyId: 'projects/my-gcp-project/locations/global/keyRings/my-keyring/cryptoKeys/my-key',
+        provider: 'gcp',
+      }
+    }),
+  ],
+});
+```
+
+### 3. GitHub Action (`veilmesh/veil-guard-action`)
+Automates installation and signing inside GitHub Actions pipelines.
+
+```yaml
+- name: Sign Assets c veil-guard
+  uses: veilmesh/veil-guard-action@v1
+  with:
+    dist: 'dist'
+    trust-root: 'trust-root.json'
+    keys: '.keys/alice.key.json'
+    exclude: |
+      /api/
+      /ws/
+    kms-key-id: 'arn:aws:kms:us-east-1:123456789012:key/my-key-uuid'
+    kms-provider: 'aws'
+  env:
+    AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+    AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
 ---

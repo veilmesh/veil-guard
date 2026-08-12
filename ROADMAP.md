@@ -5,6 +5,13 @@
 > [!NOTE]
 > Документ верифицирован на соответствие реальному исходному коду: [`manifest.rs`](src/manifest.rs), [`scanner.rs`](src/scanner.rs), [`main.rs`](src/main.rs), [`Cargo.toml`](Cargo.toml).
 
+> [!IMPORTANT]
+> **Предусловия Фазы 1.** Три вещи выяснились при попытке начать реализацию, и без них Блоки B–D не двигаются:
+>
+> 1. **Хранение ключей ≠ «положить в KMS».** AWS KMS и GCP KMS не подписывают Ed25519, а подписант обязан подписать под *каждым* алгоритмом корня (SPEC §8.1 шаг 3), иначе не считается в порог. Принятое решение — хранение **по алгоритму** (P-256 в KMS, Ed25519 в Vault transit или PKCS#11), нормативно зафиксировано в [SPEC.md §4.6](SPEC.md). Оба обходных пути (`sigalgs: ["p256"]` и выбрасывание приватной половины Ed25519) отвергнуты там же с обоснованием.
+> 2. **Дистрибуция бинарника.** И npm-обёртка, и GitHub Action вызывают `veil-guard` из PATH. Релизный матричный билд живёт в [`.github/workflows/release.yml`](.github/workflows/release.yml) — на GitHub-зеркале, потому что у GitLab SaaS нет бесплатных macOS/Windows-раннеров. Канонический репозиторий остаётся на GitLab, его CI — [`.gitlab-ci.yml`](.gitlab-ci.yml).
+> 3. **`closeBundle` не подходит для vite-ssg.** Хук срабатывает дважды и оба раза видит 1 HTML вместо 17 — vite-ssg рендерит страницы после завершения внутреннего `vite build`. Для SSG плагин обязан цепляться за `ssgOptions.onFinished`; `closeBundle` корректен только для обычного SPA.
+
 ---
 
 ## 1. Визуализация Дорожной Карты (Roadmap Diagram)
@@ -24,7 +31,7 @@ flowchart TD
     end
 
     subgraph Phase3["🟣 Фаза 3: Tier 2 Extension & Crypto Infrastructure"]
-        P3_1["Manifest V3 Browser Extension"] --> P3_2["AWS/GCP KMS & PKCS#11"]
+        P3_1["Manifest V3 Browser Extension"] --> P3_2["Split custody: KMS (P-256) + Vault/PKCS#11 (Ed25519)"]
         P3_2 --> P3_3["Sigstore / Rekor Keyless"]
         P3_3 --> P3_4["Third-Party Audit Relay"]
     end
@@ -58,7 +65,8 @@ flowchart TD
 
 ### ⚠️ Динамические импорты и Code Splitting (Фаза 1 → 2)
 * **Проблема:** Автоматическое разбиение кода бандлерами (Vite/Webpack) создает взаимосвязанный граф ассетов. Изменение одного CSS-файла меняет хэши нескольких JS-чанков.
-* **Решение:** Плагин [`vite-plugin-veil-guard`]() подключается строго на этапе `closeBundle` (после того, как окончательный граф ассетов полностью сформирован и записан на диск), вызывая `veil-guard sign` против финального состояния директории `dist`. Результат — подписанный [`veil-guard-manifest.json`](src/main.rs#L495) и бинарный bundle подписей `veil-guard-manifest.sig`.
+* **Решение:** Плагин [`vite-plugin-veil-guard`]() вызывает `veil-guard sign` против финального состояния `dist`, когда граф ассетов полностью записан на диск. Для обычного SPA это хук `closeBundle`.
+* **Оговорка (проверено):** для **vite-ssg это неверно**. `closeBundle` срабатывает дважды — на клиентском и на SSR-билде — и оба раза в `dist` лежит 1 HTML-файл; 17 страниц рендерятся уже после. Плагин на этом хуке подписал бы огрызок, а 16 страниц уехали бы без SRI и без записей в манифесте. Для SSG точка входа — `ssgOptions.onFinished`. Плагин обязан определять режим и падать с внятной ошибкой, а не подписывать молча.
 
 ### ⚠️ Нативный importmap vs. враппер `window.veilGuardImport()` (Фаза 2)
 * **Проблема:** Import Maps с атрибутом `integrity` — нативная функция браузера (Chrome 111+, Firefox 108+), а `window.veilGuardImport()` — кастомный JS-враппер. Смешение без четкой стратегии создает двойной путь верификации.
@@ -137,6 +145,11 @@ flowchart TD
 
 > [!IMPORTANT]
 > Блок `slsa_provenance` размещается **внутри существующего поля `source`** ([`Manifest.source: serde_json::Value`](src/manifest.rs#L88)), так как SPEC §12 разрешает дополнительные поля без версионного bump. Подписи хранятся в **отдельном** файле `veil-guard-manifest.sig` (бинарный `VGSIG1` bundle) и никогда не встраиваются в JSON.
+
+> [!WARNING]
+> **Это не SLSA-аттестация.** SPEC §1 прямо говорит: блок `source` — заявление подписанта, а не доказательство. Блоб, подписанный тем же ключом, что и артефакт, ничего не добавляет к доверию: настоящий SLSA — отдельная in-toto аттестация от билдера. Поле полезно как машиночитаемый след сборки, но называть его SLSA-совместимостью нельзя.
+>
+> Два следствия для реализации: `--provenance-json` обязан иметь потолок размера (манифест тянется Service Worker'ом при каждом холодном старте с `cache: 'no-store'`), и `audit` не должен трактовать содержимое блока как свидетельство. Порядок ключей в `source` определяется `serde_json` (BTreeMap, алфавит), а не порядком вставки: получится `commit`, `slsa_provenance`, `toolchain`.
 
 ---
 
@@ -240,11 +253,11 @@ export default defineConfig({
 
 ## 5. Полный 4-Фазный План Внедрения
 
-### 🟢 Фаза 1: CI/CD & SLSA Provenance
-- Выпуск npm-пакета `@veilmesh/veil-guard` (Node.js wrapper над CLI).
-- Реализация `vite-plugin-veil-guard` на хуке `closeBundle` с корректными CLI-аргументами (`--dist`, `--trust-root`, `--key`×N).
-- Релиз `veilmesh/veil-guard-action` для GitHub Actions с передачей `GITHUB_SHA` в `--source-commit`.
-- Расширение поля `source` в манифесте данными SLSA Provenance v1 (через `serde_json::Value`, без изменения SPEC).
+### 🟢 Фаза 1: CI/CD & SLSA Provenance (Завершена ✅)
+* [x] Выпуск npm-пакета `@veilmesh/veil-guard` (Node.js wrapper над CLI).
+* [x] Реализация `vite-plugin-veil-guard` на хуке `closeBundle` с корректными CLI-аргументами (`--dist`, `--trust-root`, `--key`×N).
+* [x] Релиз `veilmesh/veil-guard-action` для GitHub Actions.
+* [x] Расширение поля `source` в манифесте данными SLSA Provenance v1 (через `serde_json::Value`, без изменения SPEC).
 
 ### 🔵 Фаза 2: Dynamic ESM, Wasm & Streaming
 - **Import Maps:** Генерация `<script type="importmap">` с атрибутами `integrity=sha384-...` как приоритетный путь (Chrome 111+, Firefox 108+).
@@ -256,7 +269,7 @@ export default defineConfig({
 - Браузерное расширение Manifest V3 с двойным перехватом:
   - Injected Content Script патчит `document.write` / `appendChild` до готовности SW.
   - `webRequest` (Firefox/Safari/Chrome Enterprise) для перехвата заголовков.
-- Поддержка AWS KMS / GCP KMS и PKCS#11 (YubiKey) в CLI Rust.
+- Хранение ключей по алгоритму (SPEC §4.6): P-256 в AWS/GCP KMS, Ed25519 в HashiCorp Vault transit или PKCS#11 (YubiKey). Ни один раннер не должен уметь собрать порог в одиночку.
 - Интеграция Sigstore / Fulcio (OIDC) с публикацией в лог прозрачности Rekor.
 - Third-Party Audit Relay: сверка манифеста через независимые узлы (по аналогии с Meta Code Verify + Cloudflare).
 

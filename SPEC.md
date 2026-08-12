@@ -178,6 +178,50 @@ trust_root_id = SHA-256( "veil-guard/trustroot/v1" ‖ 0x00 ‖ TR_BYTES )
 Full 32 bytes, hex. The manifest carries both `trust_root` and `trust_root_id`; a
 verifier **MUST** recompute the ID and reject the manifest on mismatch.
 
+### 4.6 Key custody
+
+This section is normative for tooling, not for the wire format. It exists because the
+obvious plan — "put the signing keys in a cloud KMS" — does not work against §4.1, and
+the reason needs to be written down before someone implements half of it.
+
+**The constraint.** A signer is one Ed25519 keypair *and* one P-256 keypair (§4.1),
+its `key_id` is a hash over **both** public keys (§4.2), and a signer contributes to
+the threshold only if it signed under **every** algorithm the trust root lists (§8.1
+step 3). That last rule is the downgrade defense: an attacker holding one algorithm's
+private key cannot drop the other and still reach the threshold.
+
+**What that rules out.** AWS KMS and GCP KMS offer asymmetric signing over RSA and the
+NIST curves. Neither signs Ed25519. A signer whose key material lives entirely in
+either service can therefore never produce a qualifying signature. Two workarounds
+exist and both are rejected here:
+
+- Setting `sigalgs` to `["p256"]` alone. Legal per §4.4, and it does let a KMS-only
+  signer qualify — by deleting the very property §8.1 step 3 was written to provide.
+  A trust root that lists one algorithm has no downgrade defense to lose.
+- Generating the Ed25519 half and discarding its private key. The identity still
+  requires the public half, so `key_id` stays derivable, but every signature is then
+  effectively single-algorithm with extra steps.
+
+**The rule.** An implementation **MUST NOT** require any private key to be readable by
+the build process, and **MUST NOT** weaken §8.1 step 3 to accommodate a backend that
+cannot sign under every listed algorithm. Custody is therefore **per algorithm**: each
+half of a signer may live in a different service, and both may be remote. A signer is
+an interface that answers "sign these bytes under this algorithm", not a file.
+
+**KMS Integration.** Conforming implementations of the build CLI support remote signing delegation for P-256 keys via `--kms-key-id <KEY_ID>` and `--kms-provider <aws|gcp>` CLI arguments. When these parameters are supplied, the CLI delegates ECDSA signing to the specified cloud provider (authenticating via standard IAM environments or Application Default Credentials). Since AWS KMS and GCP KMS return signatures encoded in ASN.1 DER, the CLI MUST parse the DER-encoded signature and serialize it into the raw 64-byte `r‖s` format before inserting it into the signature bundle (§5), satisfying the WebCrypto compatibility requirements (§2.1).
+
+A conforming deployment is one where no single machine — least of all a CI runner —
+can produce a threshold of signatures on its own. Concretely: the two `build` signers'
+P-256 halves in a cloud KMS, their Ed25519 halves in a service that signs Ed25519
+(HashiCorp Vault's transit engine, or a PKCS#11 HSM), and the `recovery` signer
+offline on hardware that never touches CI.
+
+**Until that exists**, `veil-guard keygen` writes both private halves to disk
+unencrypted at mode 0600. That is adequate for a build key on a machine you already
+trust with the build, and inadequate for anything else. A `recovery` key **MUST NOT**
+be stored this way: its entire purpose is to survive the compromise of the machines
+that hold the build keys, which it cannot do while sitting next to them.
+
 ---
 
 ## 5. Signature bundle (`veil-guard-manifest.sig`)
@@ -260,7 +304,21 @@ duplicate `spec`, `version`, `not_after`, `sigalgs`, `trust_root`, `trust_root_i
   "source": {
     "commit": "…",
     "repo": "https://github.com/…",
-    "toolchain": { "node": "22.5.1", "vite": "5.4.21", "veil_guard": "0.1.0" }
+    "toolchain": { "node": "22.5.1", "vite": "5.4.21", "veil_guard": "0.1.0" },
+    "slsa_provenance": {
+      "builder": { "id": "https://github.com/veilmesh/veil-guard-action@v1" },
+      "build_type": "https://slsa.dev/provenance/v1",
+      "invocation": {
+        "config_source": {
+          "uri": "git+https://github.com/example/app",
+          "digest": { "sha256": "…" },
+          "entry_point": ".github/workflows/deploy.yml"
+        },
+        "environment": {
+          "github_run_id": "…"
+        }
+      }
+    }
   },
   "assets": [
     {
@@ -291,6 +349,7 @@ duplicate `spec`, `version`, `not_after`, `sigalgs`, `trust_root`, `trust_root_i
   and nothing else. A verifier that does not recognize the member ignores it and
   resolves navigations without the fallback, which is the safe direction: an
   unresolved navigation passes through rather than being blocked.
+- `source` **MUST** be an object. It contains advisory metadata about the build origin. It **MAY** contain a `slsa_provenance` object representing the build's SLSA provenance. The presence of this object does not imply verification (per §1, it is a claim by the signer, not a cryptographic proof of reproducibility).
 
 ### 6.4 `content_type` comparison
 

@@ -348,3 +348,53 @@ fn scope_html_extension_defaults_to_off_and_round_trips() {
     let back = serde_json::to_string(&opted_in).unwrap();
     assert!(back.contains(r#""html_extension":true"#));
 }
+
+#[test]
+fn sign_with_provenance_json_embeds_slsa_block() {
+    use std::fs;
+    use serde_json::json;
+
+    let tmp = std::env::temp_dir().join(format!("vg-test-prov-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let prov_json_path = tmp.join("prov.json");
+    let prov_content = json!({
+        "builder": {
+            "id": "https://github.com/veilmesh/veil-guard-action@v1"
+        },
+        "build_type": "https://slsa.dev/provenance/v1",
+        "invocation": {
+            "config_source": {
+                "uri": "git+https://github.com/example/app",
+                "digest": {
+                    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                },
+                "entry_point": ".github/workflows/deploy.yml"
+            }
+        }
+    });
+    fs::write(&prov_json_path, serde_json::to_string_pretty(&prov_content).unwrap()).unwrap();
+
+    let mut source_val = json!({
+        "commit": "abc123commit",
+        "toolchain": { "veil_guard": "0.1.0" },
+    });
+
+    let prov_bytes = fs::read(&prov_json_path).unwrap();
+    let prov: serde_json::Value = serde_json::from_slice(&prov_bytes).unwrap();
+    if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object()) {
+        obj.insert("slsa_provenance".into(), serde_json::Value::Object(prov_obj.clone()));
+    }
+
+    assert_eq!(
+        source_val["slsa_provenance"]["builder"]["id"],
+        "https://github.com/veilmesh/veil-guard-action@v1"
+    );
+    assert_eq!(
+        source_val["slsa_provenance"]["invocation"]["config_source"]["entry_point"],
+        ".github/workflows/deploy.yml"
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}

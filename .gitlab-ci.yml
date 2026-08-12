@@ -1,0 +1,113 @@
+# CI for the canonical repository (gitlab.com/veilmeshgroup/veil-guard).
+#
+# `.github/workflows/` in this repo is inert here — GitLab does not read it. It is
+# kept for the GitHub push-mirror, which exists because the release matrix needs
+# macOS and Windows runners that GitLab SaaS does not offer for free. See
+# `.github/workflows/release.yml`.
+
+stages:
+  - check
+  - test
+  - integration
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_TERM_COLOR: always
+
+.rust:
+  image: rust:1-bookworm
+  before_script:
+    - rustup component add rustfmt clippy
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry/index
+      - .cargo/registry/cache
+      - target/
+
+lint:
+  extends: .rust
+  stage: check
+  script:
+    - cargo fmt --all --check
+    # The auditor is behind a feature flag, so both shapes of the crate need
+    # linting: the default build must stay free of network code, and the audit
+    # build must still compile clean.
+    - cargo clippy --all-targets -- -D warnings
+    - cargo clippy --all-targets --features audit -- -D warnings
+
+test:rust:
+  extends: .rust
+  stage: test
+  script:
+    - cargo test --all-targets
+    - cargo test --all-targets --features audit
+    # Handed to the integration stage so the Node job does not need a Rust
+    # toolchain just to exercise the binary.
+    - cargo build --release --features audit
+  artifacts:
+    paths:
+      - target/release/veil-guard
+    expire_in: 1 day
+
+# SPEC.md §11: the conformance vectors are only meaningful if a second, independent
+# implementation is held to them. This is the JavaScript side.
+test:javascript:
+  image: node:22-bookworm
+  stage: test
+  script:
+    - node testdata/verify_vectors.mjs
+    - node testdata/verify_policy.mjs
+
+# A build the CLI signs must verify under the JavaScript verifier and produce a
+# Service Worker that actually evaluates. Neither is provable from unit tests.
+e2e:
+  image: node:22-bookworm
+  stage: integration
+  needs: ["test:rust"]
+  script:
+    # One block scalar rather than a list of steps: several of these lines start
+    # with a shell variable in quotes, which YAML would read as a quoted scalar
+    # followed by junk.
+    - |
+      set -eux
+      BIN="$CI_PROJECT_DIR/target/release/veil-guard"
+      chmod +x "$BIN"
+
+      mkdir -p e2e/dist/assets
+      printf 'body{color:#000}\n' > e2e/dist/assets/app.css
+      printf 'export const x = 1;\n' > e2e/dist/assets/app.js
+      cat > e2e/dist/index.html <<'HTML'
+      <!doctype html>
+      <html><head>
+      <link rel="stylesheet" href="/assets/app.css">
+      <script type="module" src="/assets/app.js"></script>
+      <script>window.__BOOT__=1;</script>
+      </head><body><div id="app"></div></body></html>
+      HTML
+
+      "$BIN" keygen --out-dir e2e/keys --name alice
+      "$BIN" keygen --out-dir e2e/keys --name bob
+      "$BIN" trust-root \
+        --key e2e/keys/alice.pub.json \
+        --key e2e/keys/bob.pub.json \
+        --threshold 2 --out e2e/trust-root.json
+
+      "$BIN" sign --dist e2e/dist --trust-root e2e/trust-root.json \
+        --key e2e/keys/alice.key.json --key e2e/keys/bob.key.json \
+        --headers-out e2e/headers
+      "$BIN" verify --dist e2e/dist --trust-root e2e/trust-root.json
+      "$BIN" runtime --trust-root e2e/trust-root.json --out e2e/public
+
+      # The Rust signer and the JavaScript verifier must agree on the same bytes.
+      node testdata/verify_manifest.mjs e2e/dist e2e/trust-root.json VALID
+      node testdata/run_sw_smoke.mjs e2e/public/veil-guard-sw.js
+
+      # And the whole thing is worthless if a modified asset still passes.
+      printf 'export const x = 2;\n' > e2e/dist/assets/app.js
+      if "$BIN" verify --dist e2e/dist --trust-root e2e/trust-root.json; then
+        echo "verify accepted a modified asset" >&2
+        exit 1
+      fi

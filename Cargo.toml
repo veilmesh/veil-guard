@@ -30,8 +30,23 @@ clap = { version = "4.5", features = ["derive"] }
 # dozen URLs has no use for an async runtime.
 ureq = { version = "3.3", optional = true }
 
+# KMS dependencies
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+aws-config = { version = "1.1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-kms = { version = "1.1", optional = true }
+google-cloud-kms = { version = "0.5", optional = true }
+google-cloud-googleapis = { version = "0.15", optional = true }
+
 [features]
 default = []
 # The auditor reaches the network, so it is kept off the default path: the signing
 # side stays small enough to review, and nothing that signs can also fetch.
 audit = ["dep:ureq"]
+# KMS support is optional and brings in async dependencies and SDKs.
+kms = [
+    "dep:tokio",
+    "dep:aws-config",
+    "dep:aws-sdk-kms",
+    "dep:google-cloud-kms",
+    "dep:google-cloud-googleapis"
+]

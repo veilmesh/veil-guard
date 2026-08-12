@@ -15,3 +15,5 @@ pub mod manifest;
 pub mod paths;
 pub mod runtime;
 pub mod scanner;
+#[cfg(feature = "kms")]
+pub mod kms;

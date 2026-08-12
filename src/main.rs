@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use veil_guard::crypto::{
     build_bundle, SigAlg, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST, PREFIX_ROTATION,
-    SUPPORTED_ALGS,
+    SUPPORTED_ALGS, SigEntry,
 };
 use veil_guard::manifest::{
     verify_manifest, verify_rotation, AssetEntry, Manifest, ManifestState, RotationStatement,
@@ -119,6 +119,18 @@ enum Commands {
         /// sign, and so must be carved out here: `--exclude /api/`.
         #[arg(long = "exclude")]
         excludes: Vec<String>,
+
+        /// Path to a JSON file containing SLSA provenance metadata to embed inside manifest source
+        #[arg(long)]
+        provenance_json: Option<PathBuf>,
+
+        /// AWS KMS Key ARN or GCP Key Resource ID for P-256 signing
+        #[arg(long)]
+        kms_key_id: Option<String>,
+
+        /// KMS provider to use
+        #[arg(long, value_parser = ["aws", "gcp"])]
+        kms_provider: Option<String>,
     },
 
     /// Emit the Tier 1 runtime with a trust root baked in
@@ -262,6 +274,77 @@ impl KeyFile {
             &veil_guard::crypto::unhex(pkcs8)?,
         )?)
     }
+
+    fn sign(
+        &self,
+        prefix: &[u8],
+        payload: &[u8],
+        kms_key_id: Option<&str>,
+        kms_provider: Option<&str>,
+    ) -> Result<Vec<SigEntry>, Box<dyn std::error::Error>> {
+        use ed25519_dalek::Signer as _;
+
+        let mut msg = Vec::with_capacity(prefix.len() + payload.len());
+        msg.extend_from_slice(prefix);
+        msg.extend_from_slice(payload);
+
+        let mut entries = Vec::new();
+        let key_id_bytes = veil_guard::crypto::unhex_array::<8>(&self.key_id)?;
+
+        // 1. Ed25519 signature
+        let seed = self
+            .ed25519_seed
+            .as_ref()
+            .ok_or("key file has no Ed25519 private seed")?;
+        let seed_bytes = veil_guard::crypto::unhex_array::<32>(seed)?;
+        let ed_signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+        let ed_sig = ed_signing_key.sign(&msg);
+
+        entries.push(SigEntry {
+            key_id: key_id_bytes,
+            alg_id: SigAlg::Ed25519.alg_id(),
+            sig: ed_sig.to_bytes().to_vec(),
+        });
+
+        // 2. P-256 signature
+        if let Some(pkcs8_hex) = &self.p256_private_pkcs8 {
+            use p256::pkcs8::DecodePrivateKey as _;
+            let pkcs8_bytes = veil_guard::crypto::unhex(pkcs8_hex)?;
+            let p256_signing_key = p256::ecdsa::SigningKey::from_pkcs8_der(&pkcs8_bytes)?;
+            let p_sig: p256::ecdsa::Signature = p256_signing_key.sign(&msg);
+            entries.push(SigEntry {
+                key_id: key_id_bytes,
+                alg_id: SigAlg::P256.alg_id(),
+                sig: p_sig.to_bytes().to_vec(),
+            });
+        } else if let Some(kms_id) = kms_key_id {
+            let sig_bytes = sign_with_kms(&msg, kms_id, kms_provider)?;
+            entries.push(SigEntry {
+                key_id: key_id_bytes,
+                alg_id: SigAlg::P256.alg_id(),
+                sig: sig_bytes,
+            });
+        } else {
+            return Err("key file has no P-256 private key and no --kms-key-id was supplied".into());
+        }
+
+        Ok(entries)
+    }
+}
+
+fn sign_with_kms(
+    _msg: &[u8],
+    _kms_key_id: &str,
+    _kms_provider: Option<&str>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    #[cfg(feature = "kms")]
+    {
+        Ok(veil_guard::kms::sign_with_kms(_msg, _kms_key_id, _kms_provider)?)
+    }
+    #[cfg(not(feature = "kms"))]
+    {
+        Err("KMS support is disabled. Rebuild with --features kms to enable.".into())
+    }
 }
 
 fn read_key_file(path: &Path) -> Result<KeyFile, Box<dyn std::error::Error>> {
@@ -329,8 +412,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("private  {}  (mode 0600, UNENCRYPTED)", priv_path.display());
             println!("public   {}", pub_path.display());
             if role == "recovery" {
-                println!("\nThis is a recovery key. It must not be stored on a build machine");
-                println!("or in CI — its whole purpose is to survive their compromise.");
+                println!("\nThis is a recovery key, and it has just been written to this disk");
+                println!("unencrypted. SPEC.md §4.6 says it MUST NOT stay there: its whole");
+                println!("purpose is to survive the compromise of the machines that hold the");
+                println!("build keys, which it cannot do while sitting next to them.");
+                println!("\nMove both files to offline media and delete them here.");
             }
         }
 
@@ -375,6 +461,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             navigation_html_fallback,
             csp_sources,
             excludes,
+            provenance_json,
+            kms_key_id,
+            kms_provider,
         } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
@@ -453,6 +542,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .or_else(|| std::env::var("SOURCE_DATE_EPOCH").ok()?.parse().ok())
                 .unwrap_or_else(now_unix);
 
+            let mut source_val = serde_json::json!({
+                "commit": source_commit.unwrap_or_default(),
+                "toolchain": { "veil_guard": env!("CARGO_PKG_VERSION") },
+            });
+
+            if let Some(prov_path) = &provenance_json {
+                let prov_bytes = fs::read(prov_path)?;
+                let prov: serde_json::Value = serde_json::from_slice(&prov_bytes)?;
+                if let (Some(obj), Some(prov_obj)) = (source_val.as_object_mut(), prov.as_object()) {
+                    obj.insert("slsa_provenance".into(), serde_json::Value::Object(prov_obj.clone()));
+                }
+            }
+
             let manifest = Manifest {
                 spec: SPEC_MANIFEST.into(),
                 version,
@@ -465,10 +567,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     exclude: excludes.clone(),
                     html_extension: navigation_html_fallback,
                 },
-                source: serde_json::json!({
-                    "commit": source_commit.unwrap_or_default(),
-                    "toolchain": { "veil_guard": env!("CARGO_PKG_VERSION") },
-                }),
+                source: source_val,
                 assets: assets
                     .iter()
                     .map(|a| AssetEntry {
@@ -486,8 +585,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for path in &keys {
                 entries.extend(
                     read_key_file(path)?
-                        .signer()?
-                        .sign(PREFIX_MANIFEST, &payload),
+                        .sign(PREFIX_MANIFEST, &payload, kms_key_id.as_deref(), kms_provider.as_deref())?,
                 );
             }
             let bundle = build_bundle(&entries);

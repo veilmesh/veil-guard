@@ -1,3 +1,11 @@
+# Runs on the GitHub push-mirror only. The canonical repository is on GitLab and
+# gates merges with `.gitlab-ci.yml`, which does the same work; this file exists so
+# the mirror is not silently unverified, and because `release.yml` next to it needs
+# macOS and Windows runners that GitLab SaaS does not provide.
+#
+# Keep the two in step. If a check is added here and not there, it does not gate
+# anything that matters.
+
 name: CI
 
 on:
