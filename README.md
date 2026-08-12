@@ -97,6 +97,36 @@ that holds signing keys.
 cargo install --path . --features audit
 ```
 
+Remote signing through AWS or GCP KMS is a second flag, and it is not in the
+default build either. `kms` pulls `aws-lc-sys` — C and assembly, built through
+cmake and bindgen — taking the dependency tree from 167 crates to 916 and the
+binary from 4.4 MB to 23 MB. Nobody who signs with local key files should carry
+that:
+
+```bash
+cargo install --path . --features audit,kms
+```
+
+#### Prebuilt binaries
+
+Release archives come in two flavours. The plain ones are `--features audit` and
+**do not** understand `--kms-key-id`; asking them to use it produces
+`KMS support is disabled`. The `-kms` archives do.
+
+| Archive | Contents |
+|---|---|
+| `veil-guard-<ver>-x86_64-unknown-linux-musl` | base; static, runs on Alpine |
+| `veil-guard-<ver>-aarch64-unknown-linux-musl` | base |
+| `veil-guard-<ver>-x86_64-apple-darwin` | base |
+| `veil-guard-<ver>-aarch64-apple-darwin` | base |
+| `veil-guard-<ver>-x86_64-pc-windows-msvc` | base |
+| `veil-guard-<ver>-x86_64-unknown-linux-gnu-kms` | **with KMS**, glibc — for CI runners |
+| `veil-guard-<ver>-aarch64-apple-darwin-kms` | **with KMS** — for signing by hand on Apple Silicon |
+
+The KMS builds are glibc and native-only because `aws-lc-sys` does not
+cross-compile to musl. On any other platform, build from source with the flag
+above.
+
 ### 2. Generate signer identities
 
 One signer is one Ed25519 keypair *and* one P-256 keypair, bound together by a key

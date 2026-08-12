@@ -28,24 +28,38 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: ${{ matrix.slug }}
     runs-on: ${{ matrix.os }}
+    # A job that cannot find a runner otherwise sits in the queue for GitHub's
+    # six-hour default before anyone notices.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          # musl rather than glibc: the binary is copied into whatever container a
-          # user's CI happens to run, and a glibc build breaks on Alpine.
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+          # Base artifacts. musl rather than glibc: the binary is copied into
+          # whatever container a user's CI happens to run, and a glibc build
+          # breaks on Alpine.
+          - { slug: x86_64-unknown-linux-musl,  target: x86_64-unknown-linux-musl,  os: ubuntu-latest,    features: audit }
+          - { slug: aarch64-unknown-linux-musl, target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, features: audit }
+          - { slug: x86_64-apple-darwin,        target: x86_64-apple-darwin,        os: macos-latest,     features: audit }
+          - { slug: aarch64-apple-darwin,       target: aarch64-apple-darwin,       os: macos-latest,     features: audit }
+          - { slug: x86_64-pc-windows-msvc,     target: x86_64-pc-windows-msvc,     os: windows-latest,   features: audit }
+
+          # KMS artifacts, shipped separately rather than folded into the base.
+          #
+          # `kms` pulls aws-lc-sys — a C and assembly library built through cmake
+          # and bindgen — and takes the dependency tree from 167 crates to 916 and
+          # the binary from 4.4 MB to 23 MB. Cross-compiling that to musl is the
+          # exact case that breaks, so these two entries are **native builds only**
+          # and deliberately target glibc on Linux.
+          #
+          # Two platforms because those are where signing actually happens: an
+          # x86_64 glibc CI runner, and an Apple Silicon machine cutting a release
+          # by hand. Anyone else builds from source; the CLI says so when the flag
+          # is used on a binary without the feature.
+          - { slug: x86_64-unknown-linux-gnu-kms, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, features: "audit,kms" }
+          - { slug: aarch64-apple-darwin-kms,     target: aarch64-apple-darwin,     os: macos-latest,  features: "audit,kms" }
 
     steps:
       - uses: actions/checkout@v4
@@ -61,12 +75,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.slug }}
 
-      # The auditor is included: a released binary that cannot run `audit` is
-      # missing the one command that survives an origin compromise.
+      # The auditor is always included: a released binary that cannot run `audit`
+      # is missing the one command that survives an origin compromise.
       - name: Build
-        run: cargo build --release --locked --features audit --target ${{ matrix.target }}
+        run: cargo build --release --locked --features ${{ matrix.features }} --target ${{ matrix.target }}
 
       # Cheap smoke test. A binary that cannot sign and verify its own output has
       # no business being published, and cross-compiled targets are exactly where
@@ -93,13 +107,53 @@ jobs:
             --key smoke/keys/a.key.json --key smoke/keys/b.key.json
           "$BIN" verify --dist smoke/dist --trust-root smoke/trust-root.json
 
+      # The whole reason these two artifacts exist. A `-kms` build that still
+      # answers "KMS support is disabled" looks identical to the base one until
+      # someone tries to sign with it in anger, so prove the feature is compiled in.
+      #
+      # The signer must have no local P-256 half, or the CLI takes the local
+      # branch and never reaches the KMS code at all — which is what made the
+      # first version of this check pass on any build.
+      #
+      # Bogus credentials with IMDS disabled: the request has to fail, and it has
+      # to fail on the network rather than hang for a minute probing an instance
+      # metadata endpoint that does not exist on a GitHub runner.
+      - name: KMS build really has the feature
+        if: endsWith(matrix.slug, '-kms')
+        shell: bash
+        env:
+          AWS_REGION: eu-west-1
+          AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+          AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          set -eux
+          BIN=target/${{ matrix.target }}/release/veil-guard
+          python3 -c "
+          import json, sys
+          p = 'smoke/keys/a.key.json'
+          k = json.load(open(p))
+          k.pop('p256_private_pkcs8', None)
+          json.dump(k, open(p, 'w'))
+          "
+          out=$("$BIN" sign --dist smoke/dist --trust-root smoke/trust-root.json \
+                  --key smoke/keys/a.key.json --key smoke/keys/b.key.json \
+                  --kms-key-id 'arn:aws:kms:eu-west-1:000000000000:key/does-not-exist' 2>&1 || true)
+          echo "$out"
+          if grep -q 'KMS support is disabled' <<<"$out"; then
+            echo "::error::artifact ${{ matrix.slug }} was built without the kms feature" >&2
+            exit 1
+          fi
+
       - name: Package
         shell: bash
         run: |
           set -eux
           VERSION="${{ inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
-          NAME="veil-guard-${VERSION}-${{ matrix.target }}"
+          # `slug`, not `target`: two entries build aarch64-apple-darwin and would
+          # otherwise produce two archives with the same name.
+          NAME="veil-guard-${VERSION}-${{ matrix.slug }}"
           mkdir -p "dist/$NAME"
           if [ -f "target/${{ matrix.target }}/release/veil-guard.exe" ]; then
             cp "target/${{ matrix.target }}/release/veil-guard.exe" "dist/$NAME/"
@@ -120,7 +174,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          # Must be unique per job, and two jobs share a target triple.
+          name: ${{ matrix.slug }}
           path: dist/*.tar.gz*
           if-no-files-found: error
 
