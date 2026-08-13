@@ -7,13 +7,14 @@
 
 use crate::crypto::{
     check_threshold, parse_bundle, SigAlg, ThresholdOutcome, TrustRoot, MAX_SAFE_INT,
-    PREFIX_MANIFEST, PREFIX_ROTATION,
+    PREFIX_MANIFEST, PREFIX_REVOCATION, PREFIX_ROTATION,
 };
 use crate::paths::to_nfc;
 use serde::{Deserialize, Serialize};
 
 pub const SPEC_MANIFEST: &str = "veil-guard/1";
 pub const SPEC_ROTATION: &str = "veil-guard/rotation/1";
+pub const SPEC_REVOCATION: &str = "veil-guard/revocation/1";
 
 /// SPEC §9.1: a bound on how far a client will walk a rotation chain in one session.
 pub const MAX_ROTATION_CHAIN: usize = 8;
@@ -204,6 +205,36 @@ pub fn verify_manifest(
     ManifestState::Valid
 }
 
+/// SPEC §9.2.3: verify manifest with revoked keys excluded from trust root threshold.
+pub fn verify_manifest_with_revocation(
+    payload: &[u8],
+    bundle: &[u8],
+    pinned: &TrustRoot,
+    pinned_version: u64,
+    now: u64,
+    supported: &[SigAlg],
+    revoked_keys: &[String],
+) -> ManifestState {
+    if revoked_keys.is_empty() {
+        return verify_manifest(payload, bundle, pinned, pinned_version, now, supported);
+    }
+    let mut filtered_root = pinned.clone();
+    filtered_root
+        .keys
+        .retain(|k| !revoked_keys.contains(&k.key_id));
+    if filtered_root.keys.len() < pinned.threshold as usize {
+        return ManifestState::UntrustedRoot;
+    }
+    verify_manifest(
+        payload,
+        bundle,
+        &filtered_root,
+        pinned_version,
+        now,
+        supported,
+    )
+}
+
 // ---------------------------------------------------------------- SPEC §9.1
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RotationStatement {
@@ -266,4 +297,85 @@ pub fn verify_rotation(
         return RotationVerdict::Reject;
     }
     RotationVerdict::Accept
+}
+
+// ---------------------------------------------------------------- SPEC §9.2
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevocationStatement {
+    pub spec: String,
+    pub version: u64,
+    pub trust_root_id: String,
+    pub revoked_keys: Vec<String>,
+    pub not_after: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevocationVerdict {
+    Accept,
+    Reject,
+}
+
+/// SPEC §9.2. Signed with the revocation prefix and by the pinned root's threshold.
+///
+/// Revokes key_ids within a trust root. Can revoke at most (keys.len() - threshold)
+/// keys without making the trust root permanently untrusted.
+pub fn verify_revocation(
+    payload: &[u8],
+    bundle: &[u8],
+    pinned: &TrustRoot,
+    pinned_revocation_version: u64,
+    now: u64,
+    supported: &[SigAlg],
+) -> RevocationVerdict {
+    if pinned.validate().is_err() {
+        return RevocationVerdict::Reject;
+    }
+
+    let Ok(entries) = parse_bundle(bundle) else {
+        return RevocationVerdict::Reject;
+    };
+
+    match check_threshold(payload, &entries, pinned, PREFIX_REVOCATION, supported) {
+        ThresholdOutcome::Qualifying(n) if n >= pinned.threshold as usize => {}
+        _ => return RevocationVerdict::Reject,
+    }
+
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return RevocationVerdict::Reject;
+    };
+    let Ok(rev) = serde_json::from_str::<RevocationStatement>(text) else {
+        return RevocationVerdict::Reject;
+    };
+
+    if rev.spec != SPEC_REVOCATION || rev.version > MAX_SAFE_INT || rev.not_after > MAX_SAFE_INT {
+        return RevocationVerdict::Reject;
+    }
+    if rev.version <= pinned_revocation_version {
+        return RevocationVerdict::Reject;
+    }
+    if now > rev.not_after || rev.not_after <= rev.version {
+        return RevocationVerdict::Reject;
+    }
+    let Ok(pinned_id) = pinned.id_hex() else {
+        return RevocationVerdict::Reject;
+    };
+    if rev.trust_root_id != pinned_id {
+        return RevocationVerdict::Reject;
+    }
+    // Arithmetic limit: cannot revoke more than (keys.len() - threshold) keys.
+    let max_revocable = pinned.keys.len().saturating_sub(pinned.threshold as usize);
+    if rev.revoked_keys.len() > max_revocable {
+        return RevocationVerdict::Reject;
+    }
+    // All revoked_keys must be 16-hex key_ids present in the pinned trust root.
+
+    let valid_key_ids: Vec<&str> = pinned.keys.iter().map(|k| k.key_id.as_str()).collect();
+    for rk in &rev.revoked_keys {
+        if !valid_key_ids.contains(&rk.as_str()) {
+            return RevocationVerdict::Reject;
+        }
+    }
+    RevocationVerdict::Accept
 }

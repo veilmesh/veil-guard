@@ -271,6 +271,24 @@ const bundleRotation = buildBundle(rotationEntries);
 // Must not verify. (SPEC §3)
 const bundleWrongPrefix = buildBundle(manifestEntries);
 
+// ---------------------------------------------------------------- revocation statement
+const revocationObj = {
+  spec: 'veil-guard/revocation/1',
+  version: VERSION + 100,
+  trust_root_id: hex(TR_ID),
+  revoked_keys: [hex(signers[0].key_id)],
+  not_after: NOT_AFTER,
+  reason: 'Key 0 compromised in test',
+};
+const revocationBytes = Buffer.from(JSON.stringify(revocationObj, null, 2) + '\n', 'utf8');
+const revocationEntries = [];
+for (const [i, s] of quorum.entries()) {
+  revocationEntries.push({ key_id: s.key_id, alg_id: ALG_ID.ed25519, sig: signEd(s, PREFIX.revocation, revocationBytes) });
+  revocationEntries.push({ key_id: s.key_id, alg_id: ALG_ID.p256, sig: frozenP256(`revocation.${i}`, s, PREFIX.revocation, revocationBytes) });
+}
+const bundleRevocation = buildBundle(revocationEntries);
+
+
 // ---------------------------------------------------------------- malformed bundles
 const malformed = {
   bad_magic:      hex(Buffer.concat([Buffer.from('VGSIG0', 'ascii'), bundleValid.subarray(6)])),
@@ -382,6 +400,13 @@ const out = {
     wrong_prefix_bundle_hex: hex(bundleWrongPrefix),
     wrong_prefix_expect: 'REJECT',
     wrong_prefix_note: 'manifest-prefixed signatures must not verify as a rotation (SPEC §3)',
+  },
+
+  revocation: {
+    payload_utf8_hex: hex(revocationBytes),
+    bundle_hex: hex(bundleRevocation),
+    expect: 'ACCEPT',
+    revoked_key_id: hex(signers[0].key_id),
   },
 
   paths: {

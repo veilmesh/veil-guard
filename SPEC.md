@@ -242,7 +242,21 @@ A `recovery` key **MUST NOT** be stored in either mode: its entire purpose is to
 survive the compromise of the machines that hold the build keys, which it cannot do
 while sitting next to them.
 
+### 4.7 Tier 2 Trust Root Provisioning & TOFU UI State Rules
+
+Tier 2 (Browser Extension) cannot rely on fetching `trust_root.json` from the checked origin on the first visit without verification, as an initial origin compromise would cause the extension to pin the attacker's fake root and erroneously declare the site `VALID`.
+
+A conforming Tier 2 implementation **MUST** evaluate trust root sources using the following hierarchy:
+
+1. **Bundled Trust Registry**: Pre-shipped JSON mapping of canonical domain origins to their trusted `trust_root_id`s, packaged statically inside the extension.
+2. **Enterprise Policy (`chrome.storage.managed`)**: Admin-configured read-only trust root policies pushed via OS/browser MDM mechanisms.
+3. **Federated Out-of-band Registry Feed**: Signed JSON registry fetched from a user-configured or default out-of-band endpoint (`https://trust.veilmesh.org/registry.json`), verified against a hardcoded Master Vendor Public Key embedded in the extension build.
+4. **TOFU (Trust On First Use) Fallback**: If an origin is visited for the first time, its manifest is validly signed by an unverified trust root, and no out-of-band registry entry is available, the extension **MUST NOT** assign the `VALID` state or display a green status indicator. Instead, it **MUST** assign the `TOFU_UNVERIFIED` state ("Pinned on first visit from origin, unverified out-of-band").
+
+The state **MUST** transition to `VALID` (green) only after out-of-band confirmation or explicit, manual user confirmation in the extension UI.
+
 ---
+
 
 ## 5. Signature bundle (`veil-guard-manifest.sig`)
 
@@ -635,19 +649,57 @@ back to a superseded root.
 Rotation chains **MUST** be applied one link at a time and **MUST NOT** contain cycles;
 a verifier **MUST** cap the number of links it will apply in one session at 8.
 
-### 9.2 Revocation, and what it cannot do
+### 9.2 Revocation, Wire Format & Verifier Handling
 
-A revocation statement marks `key_id`s as no longer trusted. It is signed with the
-`veil-guard/revocation/v1` prefix and requires the trust root's threshold.
+A revocation statement marks one or more `key_id`s within a specific `trust_root` as no longer trusted.
 
-**A revocation cannot be delivered to Tier 1 by the compromised origin it protects.**
-The origin serving the Service Worker is precisely the party a revocation would be
-defending against, and it will simply not serve the statement. Revocation is therefore
-a **Tier 0 and Tier 2 mechanism**: the CLI auditor and the browser extension fetch it
-out-of-band. The Service Worker consumes a revocation only if it happens to receive
-one, and its absence means nothing.
+#### 9.2.1 Revocation Statement Wire Format (`veil-guard/revocation/1`)
 
-Implementations **MUST NOT** describe revocation as protecting Tier 1 clients.
+```json
+{
+  "spec": "veil-guard/revocation/1",
+  "version": 1754500000,
+  "trust_root_id": "7fa0341201e07afa",
+  "revoked_keys": ["a1b2c3d4e5f67890"],
+  "not_after": 1757092800,
+  "reason": "Key compromise detected in incident INC-2026-08"
+}
+```
+
+- `spec` **MUST** be exact string `"veil-guard/revocation/1"`.
+- `version` **MUST** be an unsigned integer Unix timestamp representing the statement issuance time.
+- `trust_root_id` **MUST** be the 16-hex character `trust_root_id` (§4.5) to which this revocation applies.
+- `revoked_keys` **MUST** be an array of 16-hex character `key_id`s (§4.1) present in the targeted `trust_root`.
+- `not_after` **MUST** be an unsigned integer Unix timestamp after which this revocation statement expires.
+- `reason` **MAY** contain an optional diagnostic explanation string.
+
+The revocation statement is signed into a detached `VGSIG1` signature bundle (§5) using the signature domain prefix `veil-guard/revocation/v1`.
+
+#### 9.2.2 Arithmetic Threshold Constraints of Revocation
+
+Signing a revocation statement requires reaching the `threshold` of currently valid, un-revoked keys in the target `trust_root`.
+
+**Mathematical Limitation:** In a $k$-of-$n$ threshold scheme, a revocation statement can revoke at most $n - k$ keys.
+- For a default 2-of-3 threshold ($k=2, n=3$), a revocation statement can revoke at most **1 key**.
+- If $k$ or more keys are compromised (loss of threshold custody), revocation is **impossible**. Threshold compromise **MUST NOT** be handled by revocation; it **MUST** be handled by Rotation (§9.1) to a newly generated `trust_root`.
+
+#### 9.2.3 Verifier Handling of Revocation
+
+When evaluating a manifest against a pinned `trust_root` with an active revocation statement:
+
+1. Any `key_id` listed in `revoked_keys` **MUST** be excluded from `pinned.keys`.
+2. Any signature in `veil-guard-manifest.sig` produced by a revoked `key_id` **MUST** be ignored and **MUST NOT** contribute to `qualifying` threshold calculation (§8.1 step 3).
+3. If the number of remaining non-revoked active keys $n_{active} < k$ (threshold), the verifier **MUST** evaluate the manifest state as `UNTRUSTED_ROOT` (hard failure).
+4. If $n_{active} \ge k$ and the remaining valid signatures reach $k$, the verifier **MUST** evaluate the manifest state as `VALID`.
+
+#### 9.2.4 Delivery & Anti-Suppression Rules
+
+**A revocation cannot be delivered to Tier 1 by the compromised origin it protects.** The origin serving the Service Worker is precisely the party a revocation defends against, and a compromised origin will simply refuse to serve the revocation statement.
+
+1. Revocation is primarily a **Tier 0 (CLI Auditor) and Tier 2 (Browser Extension)** mechanism. These clients fetch revocation statements out-of-band (§4.7).
+2. A Tier 2 verifier **MUST** track `last_seen_revocation_version` per origin.
+3. If an out-of-band revocation fetch times out or fails over network, a Tier 2 verifier **MUST NOT** fallback to `VALID`. It **MUST** transition the UI state to `TOFU_UNVERIFIED` or `EXPIRED`.
+
 
 ---
 

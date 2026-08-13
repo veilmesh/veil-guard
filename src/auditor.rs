@@ -16,7 +16,11 @@
 use crate::crypto::{sha256, SUPPORTED_ALGS};
 use crate::generators::sri_value;
 use crate::html::scan;
-use crate::manifest::{verify_manifest, Manifest, ManifestState};
+use crate::manifest::{
+    verify_manifest_with_revocation, verify_revocation, Manifest, ManifestState,
+    RevocationStatement, RevocationVerdict,
+};
+
 use crate::paths::{content_type_matches, request_key};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -288,13 +292,48 @@ pub fn audit(
 
     snapshot.manifest_sha256 = Some(hex::encode(sha256(&manifest_res.body)));
 
-    let state = verify_manifest(
+    // Fetch and verify out-of-band revocation statement if present (SPEC §9.2)
+    let mut revoked_keys = Vec::new();
+    if let (Ok(rev_res), Ok(rev_sig_res)) = (
+        client.get(&format!("{base}/veil-guard-revocation.json")),
+        client.get(&format!("{base}/veil-guard-revocation.sig")),
+    ) {
+        if rev_res.status == 200 && rev_sig_res.status == 200 {
+            let now = now_unix();
+            if verify_revocation(
+                &rev_res.body,
+                &rev_sig_res.body,
+                trust_root,
+                0,
+                now,
+                SUPPORTED_ALGS,
+            ) == RevocationVerdict::Accept
+            {
+                if let Ok(rev_stmt) = serde_json::from_slice::<RevocationStatement>(&rev_res.body) {
+                    revoked_keys = rev_stmt.revoked_keys;
+                    findings.push(Finding::new(
+                        Severity::Info,
+                        "revocation-active",
+                        base.clone(),
+                        format!(
+                            "Out-of-band revocation statement active: {} key(s) revoked ({:?})",
+                            revoked_keys.len(),
+                            revoked_keys
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    let state = verify_manifest_with_revocation(
         &manifest_res.body,
         &sig_res.body,
         trust_root,
         opts.pinned_version,
         now_unix(),
         SUPPORTED_ALGS,
+        &revoked_keys,
     );
     snapshot.manifest_state = state.as_str().to_string();
 

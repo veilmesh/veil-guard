@@ -1,0 +1,28 @@
+{
+  "name": "@veilmesh/veil-guard-verify",
+  "version": "0.3.0",
+  "description": "Pure JavaScript verification engine for veil-guard protocol (SPEC.md §5, §7, §8, §9)",
+  "type": "module",
+  "main": "./veilguard-verify.mjs",
+  "exports": {
+    ".": "./veilguard-verify.mjs",
+    "./policy": "./veilguard-policy.mjs"
+  },
+  "files": [
+    "veilguard-verify.mjs",
+    "veilguard-policy.mjs"
+  ],
+  "keywords": [
+    "veil-guard",
+    "integrity",
+    "security",
+    "subresource-integrity",
+    "webcrypto"
+  ],
+  "author": "VeilMesh",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/veilmesh/veil-guard.git"
+  }
+}

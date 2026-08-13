@@ -154,7 +154,12 @@ export async function trustRootId(root) {
   return hex(await sha256(cat(PREFIX.trustroot, cat(...parts))));
 }
 
+// NOTE: JS trustRootValid checks structure, threshold bounds, sorted sigalgs, and sorted key_ids.
+// Unlike Rust TrustRoot::validate(), JS does not re-derive key_id from (ed25519, p256) inside trustRootValid().
+// This is secure because trustRootId() incorporates k.key_id into the SHA-256 hash of the root,
+// so any forged/mismatched key_id will fail trust_root_id matching (§4.5).
 export function trustRootValid(root) {
+
   if (!root || !Array.isArray(root.keys) || !Array.isArray(root.sigalgs)) return false;
   if (root.keys.length < 1 || root.keys.length > 16) return false;
   if (!(root.threshold >= 1 && root.threshold <= root.keys.length)) return false;
@@ -201,10 +206,18 @@ export async function verifyManifest({
   pinnedVersion = 0,
   now = Math.floor(Date.now() / 1000),
   supported = ALL_ALGS,
+  revokedKeys = [],
 }) {
   if (!trustRootValid(pinned)) return 'UNTRUSTED_ROOT';
 
+  if (Array.isArray(revokedKeys) && revokedKeys.length > 0) {
+    const validKeys = pinned.keys.filter((k) => !revokedKeys.includes(k.key_id));
+    if (validKeys.length < pinned.threshold) return 'UNTRUSTED_ROOT';
+    pinned = { ...pinned, keys: validKeys };
+  }
+
   let entries;
+
   try {
     entries = parseBundle(bundle);
   } catch {
@@ -276,6 +289,55 @@ export async function verifyRotation({
   if (!trustRootValid(r.to_trust_root)) return 'REJECT';
   return 'ACCEPT';
 }
+
+// ------------------------------------------------------------------ SPEC §9.2
+export async function verifyRevocation({
+  payload,
+  bundle,
+  pinned,
+  pinnedRevocationVersion = 0,
+  now,
+  supported = ALL_ALGS,
+}) {
+  if (!trustRootValid(pinned)) return 'REJECT';
+
+  let entries;
+  try {
+    entries = parseBundle(bundle);
+  } catch {
+    return 'REJECT';
+  }
+
+  const t = await checkThreshold(payload, entries, pinned, PREFIX.revocation, supported);
+  if (t.state || t.qualifying < pinned.threshold) return 'REJECT';
+
+  let rev;
+  try {
+    rev = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload));
+  } catch {
+    return 'REJECT';
+  }
+  if (rev.spec !== 'veil-guard/revocation/1') return 'REJECT';
+  if (!(rev.version <= MAX_SAFE) || !(rev.not_after <= MAX_SAFE)) return 'REJECT';
+  if (rev.trust_root_id !== (await trustRootId(pinned))) return 'REJECT';
+  if (!(rev.version > pinnedRevocationVersion)) return 'REJECT';
+  if (now > rev.not_after || rev.not_after <= rev.version) return 'REJECT';
+
+  const validKeyIds = new Set(
+    await Promise.all(pinned.keys.map((k) => (k.key_id ? Promise.resolve(k.key_id) : keyId(k.ed25519, k.p256))))
+  );
+  if (!Array.isArray(rev.revoked_keys)) return 'REJECT';
+  const maxRevocable = Math.max(0, pinned.keys.length - pinned.threshold);
+  if (rev.revoked_keys.length > maxRevocable) return 'REJECT';
+
+  for (const rk of rev.revoked_keys) {
+    if (!validKeyIds.has(rk)) return 'REJECT';
+  }
+
+
+  return 'ACCEPT';
+}
+
 
 // ------------------------------------------------------------------ SPEC §7.1
 export function requestKey(rawPathname) {

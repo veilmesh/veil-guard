@@ -18,31 +18,35 @@
 
 ```mermaid
 flowchart TD
-    subgraph Phase1["🟢 Фаза 1: CI/CD & SLSA Provenance"]
-        P1_1["@veilmesh/veil-guard npm"] --> P1_2["vite-plugin-veil-guard"]
-        P1_2 --> P1_3["veilmesh/veil-guard-action"]
+    subgraph Phase1["🟢 Фаза 1: CI/CD & SLSA (Завершена ✅)"]
+        P1_1["@veilmesh/veil-guard/vite"] --> P1_3["veilmesh/veil-guard-action"]
         P1_3 --> P1_4["SLSA Provenance Embedding"]
     end
 
-    subgraph Phase2["🔵 Фаза 2: ESM, Wasm & Streaming"]
-        P2_1["Native importmap integrity (where supported)"] --> P2_2["SW fetch interception (everywhere else)"]
+    subgraph Phase2["🔵 Фаза 2: ESM, Wasm & Streaming (Завершена ✅)"]
+        P2_1["Native importmap integrity (Byte Splicing)"] --> P2_2["SW Fetch Interception & Fallback"]
         P2_2 --> P2_3["veil-guard-wasm-loader.js"]
         P2_3 --> P2_4["TransformStream sha2-Wasm Chunked Hashing"]
     end
 
-    subgraph Phase3["🟣 Фаза 3: Tier 2 Extension & Crypto Infrastructure"]
-        P3_1["Manifest V3 Browser Extension"] --> P3_2["Split custody: KMS (P-256) + Vault/PKCS#11 (Ed25519)"]
-        P3_2 --> P3_3["Sigstore / Rekor Keyless"]
-        P3_3 --> P3_4["Third-Party Audit Relay"]
+    subgraph Phase3A["🟣 Фаза 3A: Tier 2 Extension & Revocation (Завершена ✅)"]
+        P3A_1["Manifest V3 Extension (Chrome DNR + Firefox Filter)"] --> P3A_2["Out-of-Band Key Revocation (§9.2)"]
+        P3A_2 --> P3A_3["Cross-Tier Threshold Reduction & Error Code 1"]
     end
 
-    subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit"]
-        P4_1["W3C Integrity Violation Endpoint"] --> P4_2["veil-guard audit --daemon"]
+    subgraph Phase3B["🟣 Фаза 3B: Advanced Crypto & Rekor (В планах ⏳)"]
+        P3B_1["Split custody: KMS + Vault/PKCS#11"] --> P3B_2["Sigstore / Rekor Keyless"]
+        P3B_2 --> P3B_3["Third-Party Audit Relay"]
+    end
+
+    subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)"]
+        P4_1["W3C & Guardian Integrity Violation Endpoint"] --> P4_2["veil-guard audit --daemon"]
         P4_2 --> P4_3["SIEM / Datadog / PagerDuty"]
     end
 
-    Phase1 --> Phase2 --> Phase3 --> Phase4
+    Phase1 --> Phase2 --> Phase3A --> Phase3B --> Phase4
 ```
+
 
 ---
 
@@ -267,24 +271,33 @@ export default defineConfig({
 ### 🟢 Фаза 1: CI/CD & SLSA Provenance (Завершена ✅)
 * [x] Выпуск npm-пакета `@veilmesh/veil-guard` (Node.js wrapper над CLI).
 * [x] Реализация `vite-plugin-veil-guard` на хуке `closeBundle` с корректными CLI-аргументами (`--dist`, `--trust-root`, `--key`×N).
+* [x] Слияние плагина и обертки в единый пакет с подпутём `@veilmesh/veil-guard/vite`.
 * [x] Релиз `veilmesh/veil-guard-action` для GitHub Actions.
 * [x] Расширение поля `source` в манифесте данными SLSA Provenance v1 (через `serde_json::Value`, без изменения SPEC).
 
-### 🔵 Фаза 2: Dynamic ESM, Wasm & Streaming
-- **Import Maps:** Генерация `integrity` внутри `<script type="importmap">` — там, где браузер это понимает, модули проверяются нативно, без участия JS. Где не понимает, ключ игнорируется и работает обычный перехват SW. Деградация безопасная в обе стороны.
-- **Legacy Fallback:** Враппер `window.veilGuardImport(url)` для браузеров без поддержки `importmap integrity`.
-- Аттестационный loader для WebAssembly (`veil-guard-wasm-loader.js`): перехват `WebAssembly.instantiateStreaming` с проверкой SHA-256 из манифеста.
-- Потоковая проверка: компиляция **`sha2`** (уже в `Cargo.toml`) под `wasm32-unknown-unknown` для Chunked Hashing в `TransformStream` Service Worker.
+### 🔵 Фаза 2: Dynamic ESM, Wasm & Streaming (Завершена ✅)
+* [x] **Import Maps:** Нативный поиск `<script type="importmap">`, извлечение ESM-модулей и автоматическая инъекция `integrity` через байтовый сплайсинг (SPEC §10.1).
+* [x] **Legacy Fallback:** Враппер `window.veilGuardImport(url)` для браузеров без поддержки `importmap integrity`.
+* [x] **WebAssembly Attestation Loader:** `veil-guard-wasm-loader.js` с перехватом `WebAssembly.instantiateStreaming` и сверкой SHA-256.
+* [x] **Chunked Hashing:** Потоковый Wasm-хешер `sha2` под `wasm32-unknown-unknown` для потоковой проверки в `TransformStream` Service Worker.
 
-### 🟣 Фаза 3: Tier 2 Extension, Cloud KMS & Rekor
-- Браузерное расширение Manifest V3 с двойным перехватом:
-  - Injected Content Script патчит `document.write` / `appendChild` до готовности SW.
-  - `webRequest` (Firefox/Safari/Chrome Enterprise) для перехвата заголовков.
+### 🟣 Фаза 3A: Tier 2 Extension & Out-of-Band Key Revocation (Завершена ✅)
+* [x] **Browser Extension Manifest V3 (`veil-guard-ext`)**:
+  - Chrome 111+ (`declarativeNetRequest` + Interstitial alert page + MAIN/ISOLATED world Guardian).
+  - Firefox 128+ (`webRequestFilterResponse` для потоковой блокировки ответа на уровне сети браузера).
+* [x] **Спецификация и вычисление Отзыва ключей (SPEC §9.2)**:
+  - Wire Format `veil-guard/revocation/1`.
+  - Арифметическое ограничение $k$-of-$n$: `revoked_keys.len() <= keys.len() - threshold` (возвращает `Reject` / CLI error code 1).
+  - Сквозное вычитание отозванных ключей из порога во всех трех тирах: Tier 0 (`veil-guard verify` и `veil-guard audit`), Tier 1 (`veil-guard-sw.js`), Tier 2 Extension (`service-worker.js`).
+* [x] **Кросс-языковые векторы отзыва**: Генерация в `testdata/gen_vectors.mjs` и полная проверка в `cargo test` (83 теста) и `npm test` расширения (11 проверок).
+
+### 🟣 Фаза 3B: Advanced Crypto Infrastructure & Keyless Transparency (В планах ⏳)
 - Хранение ключей по алгоритму (SPEC §4.6): P-256 в AWS/GCP KMS, Ed25519 в HashiCorp Vault transit или PKCS#11 (YubiKey). Ни один раннер не должен уметь собрать порог в одиночку.
 - Интеграция Sigstore / Fulcio (OIDC) с публикацией в лог прозрачности Rekor.
 - Third-Party Audit Relay: сверка манифеста через независимые узлы (по аналогии с Meta Code Verify + Cloudflare).
 
-### 🔴 Фаза 4: Telemetry & Multi-Region Audit
-- Нативная поддержка приема отчетов **W3C `IntegrityViolationReport`**.
+### 🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)
+- Нативная поддержка приема отчетов **W3C `IntegrityViolationReport`** и Guardian-телеметрии.
 - Запуск `veil-guard audit --daemon` для непрерывного многорегионального мониторинга CDN 24/7.
-- Интеграция с SIEM, Datadog, Sentry и PagerDuty.
+- Интеграция с SIEM, Datadog, Sentry и PagerDuty (Slack / Webhooks).
+

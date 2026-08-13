@@ -325,6 +325,27 @@ fn rotation_matches_vectors() {
     );
 }
 
+// ------------------------------------------------------------------ SPEC §9.2
+#[test]
+fn revocation_matches_vectors() {
+    let v = vectors();
+    let payload = h(&v["revocation"]["payload_utf8_hex"]);
+    let bundle = h(&v["revocation"]["bundle_hex"]);
+    let root = pinned_root(&v);
+    let now = 1754500100u64;
+
+    assert_eq!(
+        verify_revocation(&payload, &bundle, &root, 0, now, SUPPORTED_ALGS),
+        RevocationVerdict::Accept
+    );
+
+    let rev: RevocationStatement = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(
+        rev.revoked_keys[0],
+        v["revocation"]["revoked_key_id"].as_str().unwrap()
+    );
+}
+
 // ------------------------------------------------------------------ SPEC §7
 #[test]
 fn nfc_normalization() {
@@ -535,5 +556,83 @@ fn generated_signers_produce_a_usable_trust_root() {
         check_threshold(payload, &parsed, &root, PREFIX_ROTATION, SUPPORTED_ALGS),
         ThresholdOutcome::Tampered,
         "the same signatures must not count under another domain prefix"
+    );
+}
+
+#[test]
+fn revocation_statement_verifies_and_rejects_replay() {
+    let signers: Vec<SignerKeys> = (0..3).map(|_| SignerKeys::generate()).collect();
+    let mut keys: Vec<TrustedKey> = signers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| s.as_trusted_key(if i < 2 { "build" } else { "recovery" }))
+        .collect();
+    keys.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+
+    let root = TrustRoot {
+        threshold: 2,
+        sigalgs: vec![SigAlg::Ed25519, SigAlg::P256],
+        keys,
+    };
+    root.validate().expect("generated root is valid");
+
+    let revoked_key_id = root.keys[0].key_id.clone();
+    let now = 1750000000u64;
+
+    let statement = veil_guard::manifest::RevocationStatement {
+        spec: veil_guard::manifest::SPEC_REVOCATION.into(),
+        version: now,
+        trust_root_id: root.id_hex().unwrap(),
+        revoked_keys: vec![revoked_key_id],
+        not_after: now + 86400 * 30,
+        reason: Some("compromised key".into()),
+    };
+    let payload = serde_json::to_vec(&statement).unwrap();
+
+    let mut entries = Vec::new();
+    for s in signers.iter().take(2) {
+        entries.extend(s.sign(PREFIX_REVOCATION, &payload));
+    }
+    let bundle = build_bundle(&entries);
+
+    assert_eq!(
+        veil_guard::manifest::verify_revocation(&payload, &bundle, &root, 0, now, SUPPORTED_ALGS),
+        veil_guard::manifest::RevocationVerdict::Accept
+    );
+
+    // Replay at same version must reject.
+    assert_eq!(
+        veil_guard::manifest::verify_revocation(&payload, &bundle, &root, now, now, SUPPORTED_ALGS),
+        veil_guard::manifest::RevocationVerdict::Reject
+    );
+
+    // Expired timestamp must reject.
+    assert_eq!(
+        veil_guard::manifest::verify_revocation(
+            &payload,
+            &bundle,
+            &root,
+            0,
+            now + 86400 * 31,
+            SUPPORTED_ALGS
+        ),
+        veil_guard::manifest::RevocationVerdict::Reject
+    );
+
+    // Verify manifest threshold drop when keys are revoked below threshold.
+    let m_payload = br#"{"spec":"veil-guard/1"}"#;
+    let m_state = veil_guard::manifest::verify_manifest_with_revocation(
+        m_payload,
+        &bundle,
+        &root,
+        0,
+        now,
+        SUPPORTED_ALGS,
+        &[root.keys[0].key_id.clone(), root.keys[1].key_id.clone()],
+    );
+    assert_eq!(
+        m_state,
+        veil_guard::manifest::ManifestState::UntrustedRoot,
+        "revoking keys below threshold must evaluate to UntrustedRoot"
     );
 }

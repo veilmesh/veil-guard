@@ -14,11 +14,12 @@ use std::path::{Path, PathBuf};
 
 use veil_guard::crypto::{
     build_bundle, SigAlg, SigEntry, SignerKeys, TrustRoot, TrustedKey, PREFIX_MANIFEST,
-    PREFIX_ROTATION, SUPPORTED_ALGS,
+    PREFIX_REVOCATION, PREFIX_ROTATION, SUPPORTED_ALGS,
 };
 use veil_guard::manifest::{
-    verify_manifest, verify_rotation, AssetEntry, Manifest, ManifestState, RotationStatement,
-    RotationVerdict, Scope, SPEC_MANIFEST, SPEC_ROTATION,
+    verify_manifest, verify_manifest_with_revocation, verify_revocation, verify_rotation,
+    AssetEntry, Manifest, ManifestState, RevocationStatement, RevocationVerdict, RotationStatement,
+    RotationVerdict, Scope, SPEC_MANIFEST, SPEC_REVOCATION, SPEC_ROTATION,
 };
 
 #[derive(Parser)]
@@ -239,6 +240,30 @@ enum Commands {
         /// Override the statement version (defaults to the current Unix time)
         #[arg(long)]
         version: Option<u64>,
+    },
+
+    /// Produce a revocation statement marking specific keys in a trust root as revoked
+    Revoke {
+        /// Trust root to target
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// 16-hex key_ids to revoke
+        #[arg(long = "revoke-key", required = true)]
+        revoked_keys: Vec<String>,
+        /// Private key files of remaining non-revoked signers, enough to meet the root's threshold
+        #[arg(short, long = "key", required = true)]
+        keys: Vec<PathBuf>,
+        #[arg(short, long, default_value = "veil-guard-revocation.json")]
+        out: PathBuf,
+        /// Override the statement version (defaults to current Unix time)
+        #[arg(long)]
+        version: Option<u64>,
+        /// Validity period in days (defaults to 365)
+        #[arg(long, default_value_t = 365)]
+        not_after_days: u64,
+        /// Optional reason for revocation
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -858,15 +883,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = fs::read(dist.join("veil-guard-manifest.json"))?;
             let bundle = fs::read(dist.join("veil-guard-manifest.sig"))?;
 
-            let state = verify_manifest(
+            // Check for out-of-band revocation statement in dist directory (§9.2)
+            let mut revoked_keys = Vec::new();
+            let rev_path = dist.join("veil-guard-revocation.json");
+            let rev_sig_path = dist.join("veil-guard-revocation.sig");
+            if rev_path.exists() && rev_sig_path.exists() {
+                if let (Ok(rev_payload), Ok(rev_bundle)) =
+                    (fs::read(&rev_path), fs::read(&rev_sig_path))
+                {
+                    let now = now_unix();
+                    if verify_revocation(&rev_payload, &rev_bundle, &root, 0, now, SUPPORTED_ALGS)
+                        == RevocationVerdict::Accept
+                    {
+                        if let Ok(rev_stmt) =
+                            serde_json::from_slice::<RevocationStatement>(&rev_payload)
+                        {
+                            revoked_keys = rev_stmt.revoked_keys;
+                            println!(
+                                "revocation   {} key(s) revoked ({:?})",
+                                revoked_keys.len(),
+                                revoked_keys
+                            );
+                        }
+                    }
+                }
+            }
+
+            let state = verify_manifest_with_revocation(
                 &payload,
                 &bundle,
                 &root,
                 pinned_version,
                 now_unix(),
                 SUPPORTED_ALGS,
+                &revoked_keys,
             );
             println!("signature    {}", state.as_str());
+
             if state.is_hard_failure() {
                 return Err(format!("manifest verification failed: {}", state.as_str()).into());
             }
@@ -973,6 +1026,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if snapshot.findings.is_empty() {
                     println!("\nno findings");
+                    println!(
+                        "\nA single clean audit shows this deployment matches what was signed.\n\
+                         It cannot show the same bundle is served to everyone — compare snapshots\n\
+                         from several vantage points with `veil-guard diff` for that."
+                    );
                 } else {
                     println!();
                     for f in &snapshot.findings {
@@ -985,11 +1043,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("           {}", f.detail);
                     }
                 }
-                println!(
-                    "\nA single clean audit shows this deployment matches what was signed.\n\
-                     It cannot show the same bundle is served to everyone — compare snapshots\n\
-                     from several vantage points with `veil-guard diff` for that."
-                );
             }
 
             if let Some(path) = out {
@@ -1099,6 +1152,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("version      {}", statement.version);
             println!("\nThis statement only moves clients that already trust the OLD root.");
             println!("It is not a revocation: see SPEC.md §9.2.");
+        }
+
+        Commands::Revoke {
+            trust_root,
+            revoked_keys,
+            keys,
+            out,
+            version,
+            not_after_days,
+            reason,
+        } => {
+            let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
+            root.validate()?;
+
+            let max_revocable = root.keys.len().saturating_sub(root.threshold as usize);
+            if revoked_keys.len() > max_revocable {
+                return Err(format!(
+                    "cannot revoke {} key(s): threshold is {} and root has {} keys. At most {} key(s) can be revoked without invalidating the root.",
+                    revoked_keys.len(),
+                    root.threshold,
+                    root.keys.len(),
+                    max_revocable
+                )
+                .into());
+            }
+
+            let now = now_unix();
+
+            let statement_version = version.unwrap_or(now);
+            let not_after = statement_version + not_after_days * 86400;
+
+            let statement = RevocationStatement {
+                spec: SPEC_REVOCATION.into(),
+                version: statement_version,
+                trust_root_id: root.id_hex()?,
+                revoked_keys: revoked_keys.clone(),
+                not_after,
+                reason,
+            };
+            let payload = (serde_json::to_string_pretty(&statement)? + "\n").into_bytes();
+
+            let mut entries = Vec::new();
+            for path in &keys {
+                entries.extend(
+                    read_key_file(path)?
+                        .signer()?
+                        .sign(PREFIX_REVOCATION, &payload),
+                );
+            }
+            let bundle = build_bundle(&entries);
+
+            if verify_revocation(&payload, &bundle, &root, 0, now, SUPPORTED_ALGS)
+                != RevocationVerdict::Accept
+            {
+                return Err(format!(
+                    "revocation would be rejected: {} signer(s) supplied, trust root needs {}",
+                    keys.len(),
+                    root.threshold
+                )
+                .into());
+            }
+
+            fs::write(&out, &payload)?;
+            let sig_path = out.with_extension("sig");
+            fs::write(&sig_path, &bundle)?;
+
+            println!("revocation   {}", out.display());
+            println!("signatures   {}", sig_path.display());
+            println!("trust_root   {}", statement.trust_root_id);
+            println!("revoked_keys {:?}", statement.revoked_keys);
+            println!("version      {}", statement.version);
+            println!("not_after    {}", statement.not_after);
         }
     }
     Ok(())
