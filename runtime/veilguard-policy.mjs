@@ -131,6 +131,13 @@ export function decideRequest({ url, origin, destination, manifestState, manifes
 }
 
 /// Decide what to do with a response that has arrived. SPEC §8.3.
+/// Decide what to do with a response that has arrived. SPEC §8.3.
+///
+/// `digestHex` and `byteLength` are omitted when the body has not been read yet —
+/// the streaming path calls this before it has either, and again from
+/// [`decideStreamedBody`] once the stream ends. Everything that can be judged from
+/// the head alone is judged on the first call, so that a redirect or a wrong media
+/// type is refused before a single byte reaches the page.
 export function decideResponse({ entry, status, redirected, contentType, digestHex, byteLength }) {
   if (status === 206) {
     // A whole-file hash says nothing about a byte range. Media that needs range
@@ -143,14 +150,30 @@ export function decideResponse({ entry, status, redirected, contentType, digestH
   if (status !== 200) {
     return { outcome: 'NETWORK_FAIL', reason: `http-${status}` };
   }
+  if (contentType && !contentTypeMatches(entry.content_type, contentType)) {
+    return { outcome: 'BLOCK_TAMPER', reason: 'content-type-mismatch' };
+  }
+  if (digestHex !== undefined && digestHex !== entry.sha256) {
+    return { outcome: 'BLOCK_TAMPER', reason: 'hash-mismatch' };
+  }
+  if (byteLength !== undefined && byteLength !== entry.size) {
+    return { outcome: 'BLOCK_TAMPER', reason: 'size-mismatch' };
+  }
+  if (digestHex === undefined || byteLength === undefined) {
+    return { outcome: 'READ_BODY' };
+  }
+  return { outcome: 'SERVE_VERIFIED' };
+}
+
+/// The second half of the streaming verdict, once the body has been counted and
+/// hashed. Split out so the two checks a stream can only make at the end are not
+/// quietly skipped along with the ones it makes at the start.
+export function decideStreamedBody({ entry, digestHex, byteLength }) {
   if (digestHex !== entry.sha256) {
     return { outcome: 'BLOCK_TAMPER', reason: 'hash-mismatch' };
   }
   if (byteLength !== entry.size) {
     return { outcome: 'BLOCK_TAMPER', reason: 'size-mismatch' };
-  }
-  if (contentType && !contentTypeMatches(entry.content_type, contentType)) {
-    return { outcome: 'BLOCK_TAMPER', reason: 'content-type-mismatch' };
   }
   return { outcome: 'SERVE_VERIFIED' };
 }

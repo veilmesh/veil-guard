@@ -633,6 +633,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (rewritten, report) =
                         veil_guard::generators::inject_sri(&original, key, &digests)?;
 
+                    // SPEC §10 step 4 (Faza 2): inject "integrity" into Import Maps.
+                    let (rewritten, im_count) =
+                        veil_guard::generators::inject_importmap_integrity(&rewritten, &digests)?;
+                    applied += im_count;
+
                     applied += report.applied.len();
                     cross_origin.extend(report.cross_origin);
                     unresolved.extend(report.unresolved);

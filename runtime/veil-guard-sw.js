@@ -14,14 +14,17 @@
 import {
   detectSupported,
   hex,
+  loadWasmHasher,
   sha256,
   trustRootId,
   verifyManifest,
+  WasmSha256Hasher,
 } from './veilguard-verify.mjs';
 import {
   applyRotationChain,
   decideRequest,
   decideResponse,
+  decideStreamedBody,
   isHardFailure,
   pinTransition,
   presentationFor,
@@ -45,6 +48,27 @@ let state = {
   supported: null,
   checkedAt: 0,
 };
+
+// Wasm SHA-256 hasher exports — loaded once and reused across all verifications.
+// `null` means the module hasn't been loaded yet; loading is lazy so that a cold
+// SW can start serving synchronously and fill this in while idle.
+let wasmHasherExports = null;
+
+async function getWasmHasher() {
+  if (!wasmHasherExports) {
+    try {
+      wasmHasherExports = await loadWasmHasher();
+    } catch {
+      // Wasm unavailable (e.g., policy restriction): fall back to buffered WebCrypto.
+    }
+  }
+  return wasmHasherExports;
+}
+
+// Streaming threshold: responses with Content-Length <= this many bytes are
+// buffered and verified in one shot (lower overhead). Larger responses, and those
+// whose size is unknown, use TransformStream incremental hashing.
+const STREAM_THRESHOLD_BYTES = 512 * 1024;
 
 // ------------------------------------------------------------------ storage
 function idb() {
@@ -254,6 +278,69 @@ function blockedResponse(reason, key) {
   return new Response(null, { status: 526, statusText: 'veil-guard integrity failure' });
 }
 
+/**
+ * Wrap `response` body in a TransformStream that incrementally hashes each chunk
+ * with the Wasm SHA-256 hasher. When the stream is fully consumed (flush), the
+ * digest is compared against `entry.sha256`. On mismatch the stream is errored,
+ * which causes the browser to treat the resource as a failed network request and
+ * stops any further execution of already-delivered script chunks.
+ *
+ * This is the preferred strategy for large responses where buffering the whole
+ * body would block the page for hundreds of milliseconds.
+ *
+ * @param {Response} response
+ * @param {{ path: string, sha256: string }} entry
+ * @param {WebAssembly.Exports} wasm
+ * @returns {Response}
+ */
+/// Verify a body as it passes through, for responses too large to hold.
+///
+/// What this cannot do is unsend bytes. Chunks reach the consumer before the
+/// digest is known, and the digest is known only at the end — there is no
+/// arrangement of a stream where that is otherwise. `controller.error()` at the
+/// end turns the resource into a network error, and for a `<script src>` that is
+/// enough, because a script whose load errors is never executed. Code reading the
+/// body itself through `fetch` has already seen the earlier chunks.
+///
+/// That is the whole reason the threshold exists: below it, buffering keeps the
+/// stronger guarantee, and only a body large enough to hurt gets the weaker one.
+function streamVerify(response, entry, wasm) {
+  const hasher = new WasmSha256Hasher(wasm);
+  let seen = 0;
+
+  const ts = new TransformStream({
+    transform(chunk, controller) {
+      // A stream chunk is usually a view into a larger buffer; the hasher takes
+      // the view as given rather than its backing store.
+      hasher.update(chunk);
+      seen += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
+    flush(controller) {
+      const verdict = decideStreamedBody({
+        entry,
+        digestHex: hasher.finalize(),
+        byteLength: seen,
+      });
+      if (verdict.outcome !== 'SERVE_VERIFIED') {
+        broadcast({ type: 'veil-guard:blocked', reason: 'TAMPERED', subject: entry.path, ...presentationFor('TAMPERED') });
+        controller.error(new TypeError(`veil-guard: ${verdict.reason} — ${entry.path}`));
+      }
+    },
+    cancel() {
+      // The consumer went away mid-body. Hand the slot back rather than waiting
+      // for a flush that will not come.
+      hasher.dispose();
+    },
+  });
+
+  return new Response(response.body.pipeThrough(ts), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers(response.headers),
+  });
+}
+
 async function cacheKeyFor(entry) {
   return new Request(`https://veil-guard.invalid/${entry.sha256}`);
 }
@@ -309,6 +396,45 @@ async function handle(request) {
 
   if (response.status === 206) return response;
 
+  // Choose verification strategy based on response size.
+  // Streaming is the exception, not the default. It buys one thing — not holding
+  // a large body in memory — and costs two: the response cannot be cached by
+  // digest, because the bytes are gone once the consumer has them, and the first
+  // chunks reach the page before the hash is known.
+  //
+  // So it is used only where that trade is worth making, and the size that decides
+  // comes from the manifest rather than the response.
+  //
+  // Not a stylistic preference. `Content-Length` describes the bytes on the wire,
+  // and the wire is usually compressed — the browser drops the header once it has
+  // decoded the body, so a Service Worker asking for it on a gzipped script gets
+  // null. Keying off it meant the streaming path never ran anywhere that enables
+  // compression, which is everywhere. The manifest, meanwhile, already records the
+  // decoded length of every asset, is signed, and is known before the request is
+  // even made.
+  const isLarge = entry.size > STREAM_THRESHOLD_BYTES;
+  const wasm = isLarge && response.body != null ? await getWasmHasher() : null;
+
+  if (wasm) {
+    // Everything judgeable from the head, before a byte is forwarded: a redirect
+    // (SPEC §7.2), a non-200, a media type that does not match what was signed.
+    // The hash and the length are settled in the stream's flush.
+    const head = decideResponse({
+      entry,
+      status: response.status,
+      redirected: response.redirected,
+      contentType: response.headers.get('content-type'),
+    });
+    if (head.outcome === 'BLOCK_TAMPER') return blockedResponse(head.reason, entry.path);
+    if (head.outcome === 'NETWORK_FAIL') {
+      broadcast({ type: 'veil-guard:network', subject: entry.path, ...presentationFor('NETWORK_FAIL') });
+      return response;
+    }
+    if (head.outcome === 'PASSTHROUGH') return response;
+    return streamVerify(response, entry, wasm);
+  }
+
+  // Buffered path (small responses, unknown length, or Wasm unavailable).
   const bytes = new Uint8Array(await response.clone().arrayBuffer());
   const verdict = decideResponse({
     entry,
@@ -359,10 +485,15 @@ self.addEventListener('message', (event) => {
       version: state.manifest?.version ?? null,
       assets: state.manifest?.assets.length ?? 0,
       checkedAt: state.checkedAt,
+      manifest: state.manifest,
       ...presentationFor(state.manifestState),
     });
   }
   if (event.data?.type === 'veil-guard:refresh') {
     event.waitUntil?.(refresh());
+  }
+  if (event.data?.type === 'veil-guard:wasm-tamper') {
+    // Wasm integrity failure reported by the page-side loader wrapper.
+    broadcast({ type: 'veil-guard:blocked', reason: 'TAMPERED', subject: event.data.subject ?? null, ...presentationFor('TAMPERED') });
   }
 });

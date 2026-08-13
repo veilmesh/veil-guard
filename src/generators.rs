@@ -96,6 +96,140 @@ pub fn inject_sri(
     Ok((splice(html, &mut insertions), report))
 }
 
+/// Rewrite one HTML document, injecting an `"integrity"` object into every
+/// `<script type="importmap">` whose inline JSON contains `"imports"` or `"scopes"`.
+///
+/// The function returns the (possibly) rewritten bytes and a count of URL–hash
+/// pairs that were added. Zero means the document had no import maps or they
+/// already covered all local paths.
+///
+/// The splice strategy (SPEC §10.1): the JSON blob is never re-serialised. We
+/// locate the existing `"integrity"` key if present and append entries, or
+/// inject a new `,"integrity":{…}` fragment at the end of the outermost object.
+pub fn inject_importmap_integrity(
+    html: &[u8],
+    digests: &HashMap<String, String>, // path → sha384-hex
+) -> Result<(Vec<u8>, usize), HtmlError> {
+    let tags = scan(html)?;
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    let mut total_injected = 0usize;
+
+    for tag in &tags {
+        // Only inline <script type="importmap"> (no src attribute).
+        if tag.name != "script" {
+            continue;
+        }
+        let ty = tag.attr("type").unwrap_or("").to_ascii_lowercase();
+        if ty != "importmap" {
+            continue;
+        }
+        if tag.attr("src").is_some() {
+            continue;
+        }
+        let Some((body_start, body_end)) = tag.content else {
+            continue;
+        };
+
+        let body = match std::str::from_utf8(&html[body_start..body_end]) {
+            Ok(s) => s,
+            Err(_) => continue, // non-UTF-8 importmap — skip.
+        };
+
+        // Parse the JSON to extract all URL values from "imports" and "scopes".
+        let map: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Collect all (path, sha384) pairs that should go into "integrity".
+        let mut entries: Vec<(String, String)> = Vec::new();
+        collect_importmap_urls(&map, digests, &mut entries);
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Decide where to splice.
+        // Strategy: find the last `}` of the top-level importmap object and
+        // insert `,"integrity":<obj>` immediately before it.
+        // If "integrity" already exists leave the document untouched.
+        if body.contains("\"integrity\"") {
+            // Already has an integrity key — skip to avoid duplication.
+            continue;
+        }
+
+        // Build the integrity JSON object (sorted by key for reproducibility).
+        total_injected += entries.len();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let integrity_obj: String = {
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(path, sha384)| {
+                    let value = sri_value(sha384).unwrap_or_default();
+                    format!("\"{}\":\"{}\"", path, value)
+                })
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        };
+
+        // Find the last `}` in the importmap body and splice the integrity object in.
+        let close_brace = match body.rfind('}') {
+            Some(p) => body_start + p,
+            None => continue,
+        };
+
+        let fragment = format!(",\"integrity\":{integrity_obj}");
+        insertions.push((close_brace, fragment));
+    }
+
+    Ok((splice(html, &mut insertions), total_injected))
+}
+
+/// Recursively walk `"imports"` and `"scopes"` to collect all string URL values
+/// that map to local paths present in `digests`.
+fn collect_importmap_urls(
+    map: &serde_json::Value,
+    digests: &HashMap<String, String>,
+    out: &mut Vec<(String, String)>,
+) {
+    // "imports": { specifier: url, … }
+    if let Some(imports) = map.get("imports").and_then(|v| v.as_object()) {
+        for url in imports.values() {
+            if let Some(path) = url.as_str().and_then(local_path) {
+                if let Some(sha384) = digests.get(path) {
+                    out.push((path.to_string(), sha384.clone()));
+                }
+            }
+        }
+    }
+
+    // "scopes": { prefix: { specifier: url, … }, … }
+    if let Some(scopes) = map.get("scopes").and_then(|v| v.as_object()) {
+        for scope_map in scopes.values() {
+            if let Some(inner) = scope_map.as_object() {
+                for url in inner.values() {
+                    if let Some(path) = url.as_str().and_then(local_path) {
+                        if let Some(sha384) = digests.get(path) {
+                            out.push((path.to_string(), sha384.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Return `Some(path)` if `url` looks like a same-origin absolute path,
+/// `None` otherwise (cross-origin, relative, data:, etc.).
+fn local_path(url: &str) -> Option<&str> {
+    let t = url.trim();
+    if t.starts_with('/') && !t.starts_with("//") {
+        Some(t.split(['?', '#']).next()?)
+    } else {
+        None
+    }
+}
+
 /// The subresource URL of a tag that supports `integrity`, if it has one.
 ///
 /// SRI applies to `<script src>` and to `<link>` with `rel` of `stylesheet`,

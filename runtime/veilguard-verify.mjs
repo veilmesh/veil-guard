@@ -344,3 +344,260 @@ export function contentTypeMatches(expected, actual) {
   if (e === a) return true;
   return CT_CLASSES.some((c) => c.includes(e) && c.includes(a));
 }
+
+// ── Wasm SHA-256 hasher ──────────────────────────────────────────────────────
+//
+// A no_std, no_alloc Rust SHA-256 implementation compiled to Wasm and embedded
+// here as Base64. JS controls the allocations using a simple bump allocator over
+// a shared scratch buffer; the Rust side is fully stateless.
+//
+// Build:
+//   cd wasm-hasher
+//   cargo build --target wasm32-unknown-unknown --release
+//   base64 -i target/wasm32-unknown-unknown/release/veil_guard_wasm_hasher.wasm
+// Then paste the output as WASM_SHA256_B64 below.
+//
+// CI refreshes this constant automatically via scripts/update-wasm-hasher.sh.
+
+// @generated — do not edit by hand
+const WASM_SHA256_B64 =
+  'AGFzbQEAAAABJgdgAn9/AGADf39/AGAEf39/fwBgAAF/YAF/AGAAAGAFf39/f38AAxEQAAEB' +
+  'AgACAQEAAwQDAQUGBgUDAQARBgkBfwFBgIDAAAsHWwYGbWVtb3J5AgAPaGFzaGVyX2ZpbmFs' +
+  'aXplAAgQaGFzaGVyX2hlYXBfYmFzZQAJC2hhc2hlcl9pbml0AAoLaGFzaGVyX3NpemUACw1o' +
+  'YXNoZXJfdXBkYXRlAAwKsyYQDgAgACABQQEQgYCAgAALhBoCGX8CfiOAgICAAEHAAWsiAySA' +
+  'gICAACADQQBBwAD8CwAgASACQQZ0aiEEIAAoAhwhBSAAKAIYIQYgACgCFCEHIAAoAhAhCCAA' +
+  'KAIMIQkgACgCCCEKIAAoAgQhCyAAKAIAIQwCQANAIAEgBEYNAUEAIQICQANAIAJBwABGDQEg' +
+  'AyACaiABIAJqKAAAIg1B/4H8B3FBCHggDUEYeEH/gfwHcXI2AgAgAkEEaiECDAALCyADIAMo' +
+  'AgAiDjYCrAEgAyADKAIEIg82AqgBIAMgAygCCCIQNgKkASADIAMoAgwiETYCoAEgAyALNgJE' +
+  'IAMgBzYCTCADIAw2AkAgAyAINgJIIAMgCjYCUCADIAk2AlQgAyAGNgJYIAMgBTYCXCADKAIc' +
+  'IQIgAygCGCENIAMoAhQhEiADIAMoAhAiEzYCbCADIBI2AmggAyANNgJkIAMgAjYCYCADKAIs' +
+  'IRQgAygCKCEVIAMoAiQhFiADIAMoAiAiFzYCfCADIBY2AnggAyAVNgJ0IAMgFDYCcCADKAI8' +
+  'IRggAygCOCEZIAMoAjQhGiADIAMoAjAiGzYCjAEgAyAaNgKIASADIBk2AoQBIAMgGDYCgAEg' +
+  'A0GwAWogA0HQAGogA0HAAGogD0GRid2JB2ogDkGY36iUBGoQjoCAgAAgAyADKQK4ATcDWCAD' +
+  'IAMpArABNwNQIANBsAFqIANBwABqIANB0ABqIBFBpbfXzX5qIBBBz/eDrntqEI6AgIAAIAMg' +
+  'AykCuAE3A0ggAyADKQKwATcDQCADQbABaiADQdAAaiADQcAAaiASQfGjxM8FaiATQduE28oD' +
+  'ahCOgICAACADIAMpArgBNwNYIAMgAykCsAE3A1AgA0GwAWogA0HAAGogA0HQAGogAkHVvfHY' +
+  'emogDUGkhf6ReWoQjoCAgAAgAyADKQK4ATcDSCADIAMpArABNwNAIANBsAFqIANB0ABqIANB' +
+  'wABqIBZBgbaNlAFqIBdBmNWewH1qEI6AgIAAIAMgAykCuAE3A1ggAyADKQKwATcDUCADQbAB' +
+  'aiADQcAAaiADQdAAaiAUQcP7sagFaiAVQb6LxqECahCOgICAACADIAMpArgBNwNIIAMgAykC' +
+  'sAE3A0AgA0GwAWogA0HQAGogA0HAAGogGkH+4/qGeGogG0H0uvmVB2oQjoCAgAAgAyADKQK4' +
+  'ATcDWCADIAMpArABNwNQIANBsAFqIANBwABqIANB0ABqIBhB9OLvjHxqIBlBp43w3nlqEI6A' +
+  'gIAAIAMgAykCuAE3A0ggAyADKQKwATcDQCADQZABaiADQaABaiATIANB8ABqIANBgAFqEI+A' +
+  'gIAAIAMoApABIQIgAygClAEhDSADQbABaiADQdAAaiADQcAAaiADKAKYAUGGj/n9fmogAygC' +
+  'nAEiEkHB0+2kfmoQjoCAgAAgAyADKQK4ATcDWCADIAMpArABNwNQIANBsAFqIANBwABqIANB' +
+  '0ABqIAJBzMOyoAJqIA1BxruG/gBqEI6AgIAAIAMgAykCuAE3A0ggAyADKQKwATcDQCADQaAB' +
+  'aiADQeAAaiAXIANBgAFqIANBkAFqEI+AgIAAIAMoAqABIQIgAygCpAEhDSADQbABaiADQdAA' +
+  'aiADQcAAaiADKAKoAUGqidLTBGogAygCrAEiE0Hv2KTvAmoQjoCAgAAgAyADKQK4ATcDWCAD' +
+  'IAMpArABNwNQIANBsAFqIANBwABqIANB0ABqIAJB2pHmtwdqIA1B3NPC5QVqEI6AgIAAIAMg' +
+  'AykCuAE3A0ggAyADKQKwATcDQCADQeAAaiADQfAAaiAbIANBkAFqIANBoAFqEI+AgIAAIAMo' +
+  'AmAhAiADKAJkIQ0gA0GwAWogA0HQAGogA0HAAGogAygCaEHtjMfBemogAygCbCIUQdKi+cF5' +
+  'ahCOgICAACADIAMpArgBNwNYIAMgAykCsAE3A1AgA0GwAWogA0HAAGogA0HQAGogAkHH/+X6' +
+  'e2ogDUHIz4yAe2oQjoCAgAAgAyADKQK4ATcDSCADIAMpArABNwNAIANB8ABqIANBgAFqIBIg' +
+  'A0GgAWogA0HgAGoQj4CAgAAgAygCcCECIAMoAnQhDSADQbABaiADQdAAaiADQcAAaiADKAJ4' +
+  'Qceinq19aiADKAJ8IhJB85eAt3xqEI6AgIAAIAMgAykCuAE3A1ggAyADKQKwATcDUCADQbAB' +
+  'aiADQcAAaiADQdAAaiACQefSpKEBaiANQdHGqTZqEI6AgIAAIAMgAykCuAE3A0ggAyADKQKw' +
+  'ATcDQCADQYABaiADQZABaiATIANB4ABqIANB8ABqEI+AgIAAIAMoAoABIQIgAygChAEhDSAD' +
+  'QbABaiADQdAAaiADQcAAaiADKAKIAUG4wuzwAmogAygCjAEiE0GFldy9AmoQjoCAgAAgAyAD' +
+  'KQK4ATcDWCADIAMpArABNwNQIANBsAFqIANBwABqIANB0ABqIAJBk5rgmQVqIA1B/Nux6QRq' +
+  'EI6AgIAAIAMgAykCuAE3A0ggAyADKQKwATcDQCADQZABaiADQaABaiAUIANB8ABqIANBgAFq' +
+  'EI+AgIAAIAMoApABIQIgAygClAEhDSADQbABaiADQdAAaiADQcAAaiADKAKYAUG7laizB2og' +
+  'AygCnAEiFEHU5qmoBmoQjoCAgAAgAyADKQK4ATcDWCADIAMpArABNwNQIANBsAFqIANBwABq' +
+  'IANB0ABqIAJBhdnIk3lqIA1BrpKLjnhqEI6AgIAAIAMgAykCuAE3A0ggAyADKQKwATcDQCAD' +
+  'QaABaiADQeAAaiASIANBgAFqIANBkAFqEI+AgIAAIAMoAqABIQIgAygCpAEhDSADQbABaiAD' +
+  'QdAAaiADQcAAaiADKAKoAUHLzOnAemogAygCrAEiEkGh0f+VemoQjoCAgAAgAyADKQK4ATcD' +
+  'WCADIAMpArABNwNQIANBsAFqIANBwABqIANB0ABqIAJBo6Oxu3xqIA1B8JauknxqEI6AgIAA' +
+  'IAMgAykCuAE3A0ggAyADKQKwATcDQCADQeAAaiADQfAAaiATIANBkAFqIANBoAFqEI+AgIAA' +
+  'IAMoAmAhAiADKAJkIQ0gA0GwAWogA0HQAGogA0HAAGogAygCaEGkjOS0fWogAygCbCITQZnQ' +
+  'y4x9ahCOgICAACADIAMpArgBNwNYIAMgAykCsAE3A1AgA0GwAWogA0HAAGogA0HQAGogAkHw' +
+  'wKqDAWogDUGF67igf2oQjoCAgAAgAyADKQK4ATcDSCADIAMpArABNwNAIANB8ABqIANBgAFq' +
+  'IBQgA0GgAWogA0HgAGoQj4CAgAAgAygCcCECIAMoAnQhDSADQbABaiADQdAAaiADQcAAaiAD' +
+  'KAJ4QYjY3fEBaiADKAJ8IhRBloKTzQFqEI6AgIAAIAMgAykCuAE3A1ggAyADKQKwATcDUCAD' +
+  'QbABaiADQcAAaiADQdAAaiACQbX5wqUDaiANQczuoboCahCOgICAACADIAMpArgBNwNIIAMg' +
+  'AykCsAE3A0AgA0GAAWogA0GQAWogEiADQeAAaiADQfAAahCPgICAACADKAKAASECIAMoAoQB' +
+  'IQ0gA0GwAWogA0HQAGogA0HAAGogAygCiAFBytTi9gRqIAMoAowBQbOZ8MgDahCOgICAACAD' +
+  'IAMpArgBNwNYIAMgAykCsAE3A1AgA0GwAWogA0HAAGogA0HQAGogAkHz37nBBmogDUHPlPPc' +
+  'BWoQjoCAgAAgAyADKQK4ATcDSCADIAMpArABNwNAIANBkAFqIANBoAFqIBMgA0HwAGogA0GA' +
+  'AWoQj4CAgAAgAygCkAEhAiADKAKUASENIANBsAFqIANB0ABqIANBwABqIAMoApgBQe/GlcUH' +
+  'aiADKAKcAUHuhb6kB2oQjoCAgAAgAyADKQK4ATcDWCADIAMpArABNwNQIANBsAFqIANBwABq' +
+  'IANB0ABqIAJBiISc5nhqIA1BlPChpnhqEI6AgIAAIAMgAykCuAE3A0ggAyADKQKwATcDQCAD' +
+  'QaABaiADQeAAaiAUIANBgAFqIANBkAFqEI+AgIAAIAMoAqABIQIgAygCpAEhDSADQbABaiAD' +
+  'QdAAaiADQcAAaiADKAKoAUHr2cGiemogAygCrAFB+v/7hXlqEI6AgIAAIAMgAykCuAE3A1gg' +
+  'AyADKQKwATcDUCADQbABaiADQcAAaiADQdAAaiACQfLxxbN8aiANQffH5vd7ahCOgICAACAD' +
+  'IAMpArgBIhw3A0ggAyADKQKwASIdNwNAIAFBwABqIQEgAygCXCAFaiEFIAMoAlggBmohBiAD' +
+  'KAJUIAlqIQkgAygCUCAKaiEKIBynIAhqIQggHacgDGohDCADKAJMIAdqIQcgAygCRCALaiEL' +
+  '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' +
+  '2YMfGc3gWw==';
+
+/**
+ * Instantiate the embedded Wasm SHA-256 hasher module.
+ * Returns the raw WebAssembly.Instance.exports object.
+ * @returns {Promise<{hasher_size: () => number, hasher_init: (p: number) => void,
+ *                    hasher_update: (p: number, d: number, n: number) => void,
+ *                    hasher_finalize: (p: number, out: number) => void,
+ *                    memory: WebAssembly.Memory}>}
+ */
+export async function loadWasmHasher() {
+  const raw = Uint8Array.from(atob(WASM_SHA256_B64), (c) => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(raw);
+  return instance.exports;
+}
+
+/**
+ * Stateless incremental SHA-256 hasher backed by the embedded Wasm module.
+ *
+ * Each instance owns a slot in the Wasm linear memory (managed by a trivial
+ * bump allocator). Call update() with each data chunk, then finalize() once to
+ * get the 32-byte hex digest. After finalize() the slot is zeroed — do not
+ * reuse the instance.
+ */
+/**
+ * Incremental SHA-256 over the embedded Wasm module.
+ *
+ * The Rust side is stateless: every call takes a caller-owned slot. Owning the
+ * allocation on this side is therefore this class's job, and getting it wrong is
+ * quiet — a wrong digest, never a trap. Two rules follow, and both were learned
+ * the hard way:
+ *
+ *  - Nothing may be written below `hasher_heap_base()`. Under that line sit the
+ *    module's static data (the round constants among it) and the shadow stack
+ *    that `hasher_update` pushes its own frame onto. Writing input there means
+ *    the callee overwrites its own argument halfway through reading it.
+ *
+ *  - Each instance needs its own slot. A Service Worker verifies several
+ *    responses at once, and a shared slot means `hasher_init` for one stream
+ *    resets another mid-flight, after which one hasher returns the other's
+ *    digest.
+ *
+ * Slots are fixed-size and recycled through a free list, so a page loading a
+ * hundred assets does not grow memory a hundred times.
+ */
+
+/** Input is copied into Wasm memory in pieces of this size. */
+const COPY_WINDOW = 64 * 1024;
+
+class SlotAllocator {
+  constructor(exports) {
+    this._ex = exports;
+    this._mem = exports.memory;
+    this._base = exports.hasher_heap_base();
+    this._stateSize = exports.hasher_size();
+    // state | digest | copy window
+    this._slotSize = align8(this._stateSize) + 32 + COPY_WINDOW;
+    this._next = 0;
+    this._free = [];
+  }
+
+  take() {
+    const index = this._free.pop() ?? this._next++;
+    const start = this._base + index * this._slotSize;
+    const end = start + this._slotSize;
+    if (end > this._mem.buffer.byteLength) {
+      const pages = Math.ceil((end - this._mem.buffer.byteLength) / 65536);
+      this._mem.grow(pages);
+    }
+    return {
+      index,
+      state: start,
+      out: start + align8(this._stateSize),
+      copy: start + align8(this._stateSize) + 32,
+    };
+  }
+
+  release(index) {
+    this._free.push(index);
+  }
+}
+
+function align8(n) {
+  return (n + 7) & ~7;
+}
+
+const allocators = new WeakMap();
+
+export class WasmSha256Hasher {
+  /** @param {WebAssembly.Exports} exports — from loadWasmHasher() */
+  constructor(exports) {
+    let alloc = allocators.get(exports);
+    if (!alloc) {
+      alloc = new SlotAllocator(exports);
+      allocators.set(exports, alloc);
+    }
+    this._alloc = alloc;
+    this._ex = exports;
+    this._mem = exports.memory;
+    this._slot = alloc.take();
+    this._done = false;
+    exports.hasher_init(this._slot.state);
+  }
+
+  /** @param {ArrayBufferView|ArrayBuffer} chunk */
+  update(chunk) {
+    if (this._done) throw new Error('WasmSha256Hasher: already finalized');
+
+    // A stream hands out views into a larger buffer far more often than not, so
+    // the offset and length have to be carried across rather than dropped.
+    const view =
+      chunk instanceof ArrayBuffer
+        ? new Uint8Array(chunk)
+        : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+
+    for (let off = 0; off < view.byteLength; off += COPY_WINDOW) {
+      const piece = view.subarray(off, Math.min(off + COPY_WINDOW, view.byteLength));
+      // `memory.grow` detaches the old ArrayBuffer, so the view is rebuilt here
+      // rather than cached on the instance.
+      new Uint8Array(this._mem.buffer).set(piece, this._slot.copy);
+      this._ex.hasher_update(this._slot.state, this._slot.copy, piece.byteLength);
+    }
+  }
+
+  /**
+   * Finalize and return the hex-encoded digest. The slot goes back to the pool.
+   * @returns {string}
+   */
+  finalize() {
+    if (this._done) throw new Error('WasmSha256Hasher: already finalized');
+    this._done = true;
+    this._ex.hasher_finalize(this._slot.state, this._slot.out);
+    const digest = new Uint8Array(this._mem.buffer, this._slot.out, 32);
+    const out = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+    this._alloc.release(this._slot.index);
+    return out;
+  }
+
+  /** Release the slot without finalizing — for an aborted stream. */
+  dispose() {
+    if (this._done) return;
+    this._done = true;
+    this._alloc.release(this._slot.index);
+  }
+}

@@ -14,6 +14,7 @@ import {
   applyRotationChain,
   decideRequest,
   decideResponse,
+  decideStreamedBody,
   inScope,
   isHardFailure,
   pinTransition,
@@ -330,6 +331,66 @@ console.log('\nrotation chains (SPEC §9.1)');
   const none = await applyRotationChain({ pin, pinnedRoot, fetchStatement: () => null });
   check('no statements means no change', none.ok && none.applied.length === 0);
 }
+
+
+console.log('\nstreamed responses (SPEC §8.3)');
+// A streamed body is judged in two halves, and the half that runs before any byte
+// is forwarded must still make every check it can. An earlier revision passed a
+// placeholder digest here, got BLOCK_TAMPER for it every time, and then discarded
+// the verdict — which silently dropped the media-type and redirect checks.
+const streamEntry = {
+  path: '/assets/big.js',
+  sha256: 'aa'.repeat(32),
+  sha384: 'bb'.repeat(48),
+  size: 900000,
+  content_type: 'text/javascript',
+};
+const head = (over = {}) =>
+  decideResponse({
+    entry: streamEntry,
+    status: 200,
+    redirected: false,
+    contentType: 'text/javascript',
+    ...over,
+  });
+
+check('a head with nothing wrong asks for the body', head().outcome === 'READ_BODY');
+check('a redirect is refused before any byte is forwarded', head({ redirected: true }).outcome === 'BLOCK_TAMPER');
+check(
+  'a wrong media type is refused before any byte is forwarded',
+  head({ contentType: 'text/html' }).outcome === 'BLOCK_TAMPER',
+);
+check('a non-200 is a network failure, not tampering', head({ status: 500 }).outcome === 'NETWORK_FAIL');
+check('a 206 is out of scope entirely', head({ status: 206 }).outcome === 'PASSTHROUGH');
+
+check(
+  'the body verdict accepts a matching digest and length',
+  decideStreamedBody({ entry: streamEntry, digestHex: 'aa'.repeat(32), byteLength: 900000 }).outcome ===
+    'SERVE_VERIFIED',
+);
+check(
+  'a mismatched digest is tampering',
+  decideStreamedBody({ entry: streamEntry, digestHex: 'cc'.repeat(32), byteLength: 900000 }).reason ===
+    'hash-mismatch',
+);
+check(
+  'a body of the wrong length is tampering even when the digest is somehow right',
+  decideStreamedBody({ entry: streamEntry, digestHex: 'aa'.repeat(32), byteLength: 12 }).reason ===
+    'size-mismatch',
+);
+
+// The buffered path keeps behaving exactly as before.
+check(
+  'a fully-read response still reaches SERVE_VERIFIED',
+  decideResponse({
+    entry: streamEntry,
+    status: 200,
+    redirected: false,
+    contentType: 'text/javascript',
+    digestHex: 'aa'.repeat(32),
+    byteLength: 900000,
+  }).outcome === 'SERVE_VERIFIED',
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

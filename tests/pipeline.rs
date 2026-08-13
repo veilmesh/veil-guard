@@ -642,4 +642,143 @@ mod cli {
             );
         }
     }
+
+    /// The injector has unit tests; this checks the artifact a browser receives.
+    /// A partial `integrity` block is worse than none — the browser refuses every
+    /// module the block does not cover — so the check runs over a real signed
+    /// build, from the JavaScript side, the way the page will read it.
+    #[test]
+    fn importmap_integrity_survives_a_real_sign() {
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("skipping: node not on PATH");
+            return;
+        }
+
+        let dir = tmpdir("importmap");
+        let dist = dir.join("dist");
+        fs::create_dir_all(dist.join("assets")).unwrap();
+        for name in ["app.js", "dep.js"] {
+            fs::write(dist.join("assets").join(name), b"export const x = 1;\n").unwrap();
+        }
+        fs::write(
+            dist.join("index.html"),
+            br#"<!doctype html><html><head>
+<script type="importmap">
+{
+  "imports": { "app": "/assets/app.js", "far": "https://cdn.example/far.js" },
+  "scopes": { "/assets/": { "dep": "/assets/dep.js" } }
+}
+</script>
+</head><body></body></html>
+"#,
+        )
+        .unwrap();
+
+        let keys = dir.join("keys");
+        ok(&["keygen", "--out-dir", keys.to_str().unwrap(), "--name", "a"]);
+        let trust_root = dir.join("trust-root.json");
+        ok(&[
+            "trust-root",
+            "--key",
+            keys.join("a.pub.json").to_str().unwrap(),
+            "--threshold",
+            "1",
+            "--out",
+            trust_root.to_str().unwrap(),
+        ]);
+        ok(&[
+            "sign",
+            "--dist",
+            dist.to_str().unwrap(),
+            "--trust-root",
+            trust_root.to_str().unwrap(),
+            "--key",
+            keys.join("a.key.json").to_str().unwrap(),
+        ]);
+
+        let out = Command::new("node")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/testdata/verify_importmap.mjs"
+            ))
+            .arg(&dist)
+            .output()
+            .expect("node runs");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "import map check failed:\n{text}");
+        assert!(text.contains("0 failed"), "{text}");
+        // The fixture has an import map, so the checker must have had something
+        // to look at — a silent "nothing to check" would pass vacuously.
+        assert!(!text.contains("nothing to check"), "{text}");
+    }
+}
+
+// ---------------------------------------------------------------- Import Maps SRI
+
+#[test]
+fn importmap_integrity_injected_for_imports() {
+    let html = br#"<html><head>
+<script type="importmap">
+{"imports":{"app":"/assets/app.js","lib":"/assets/lib.js"}}
+</script></head></html>"#;
+    let digests = digests(&[("/assets/app.js", D), ("/assets/lib.js", D)]);
+    let (rewritten, count) = inject_importmap_integrity(html, &digests).unwrap();
+    let out = std::str::from_utf8(&rewritten).unwrap();
+    assert_eq!(count, 2, "should inject 2 integrity entries");
+    assert!(
+        out.contains("\"integrity\""),
+        "integrity key must be present"
+    );
+    assert!(out.contains("\"/assets/app.js\""), "app.js must be a key");
+    assert!(out.contains("\"/assets/lib.js\""), "lib.js must be a key");
+    assert!(out.contains("sha384-"), "must include sha384- prefix");
+}
+
+#[test]
+fn importmap_integrity_injected_for_scopes() {
+    let html = br#"<html><head>
+<script type="importmap">
+{"imports":{"app":"/assets/app.js"},"scopes":{"/legacy/":{"lib":"/assets/lib-legacy.js"}}}
+</script></head></html>"#;
+    let digests = digests(&[("/assets/app.js", D), ("/assets/lib-legacy.js", D)]);
+    let (rewritten, count) = inject_importmap_integrity(html, &digests).unwrap();
+    let out = std::str::from_utf8(&rewritten).unwrap();
+    assert_eq!(count, 2, "imports + scopes = 2 entries");
+    assert!(out.contains("\"/assets/app.js\""));
+    assert!(out.contains("\"/assets/lib-legacy.js\""));
+}
+
+#[test]
+fn importmap_integrity_is_idempotent_when_key_exists() {
+    let html = br#"<html><head>
+<script type="importmap">
+{"imports":{"app":"/assets/app.js"},"integrity":{"/assets/app.js":"sha384-already"}}
+</script></head></html>"#;
+    let digests = digests(&[("/assets/app.js", D)]);
+    let (rewritten, count) = inject_importmap_integrity(html, &digests).unwrap();
+    assert_eq!(count, 0, "must leave existing integrity alone");
+    assert_eq!(rewritten, html.to_vec(), "bytes must be unchanged");
+}
+
+#[test]
+fn importmap_integrity_skips_cross_origin_and_relative() {
+    let html = br#"<html><head>
+<script type="importmap">
+{"imports":{"cdn":"https://cdn.example/mod.js","rel":"./local.js"}}
+</script></head></html>"#;
+    let digests = digests(&[("/local.js", D)]);
+    let (_, count) = inject_importmap_integrity(html, &digests).unwrap();
+    assert_eq!(count, 0, "cross-origin and relative URLs must be skipped");
+}
+
+#[test]
+fn importmap_integrity_noop_when_path_not_in_digests() {
+    let html = br#"<html><head>
+<script type="importmap">
+{"imports":{"app":"/assets/unknown.js"}}
+</script></head></html>"#;
+    let (rewritten, count) = inject_importmap_integrity(html, &digests(&[])).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(rewritten, html.to_vec());
 }

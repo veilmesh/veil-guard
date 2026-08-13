@@ -62,6 +62,12 @@ jobs:
       - name: Tier 1 policy state machine
         run: node testdata/verify_policy.mjs
 
+      # The embedded Wasm hasher fails silently — a wrong digest, never a trap —
+      # so it is checked against an independent SHA-256 rather than left to the
+      # browser.
+      - name: Embedded Wasm SHA-256 hasher
+        run: node testdata/verify_wasm_hasher.mjs
+
   # A build the CLI signs must verify under the JavaScript verifier and produce
   # a Service Worker bundle that actually evaluates. Neither is provable from
   # the unit tests alone.

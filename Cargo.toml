@@ -1,6 +1,6 @@
 [package]
 name = "veil-guard"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["VeilMesh Team <dev@veilmesh.com>"]
 description = "Web asset integrity and attestation suite: threshold-signed manifests, SRI/CSP generation, and out-of-band audit"

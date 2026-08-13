@@ -65,6 +65,9 @@ test:javascript:
   script:
     - node testdata/verify_vectors.mjs
     - node testdata/verify_policy.mjs
+    # The embedded Wasm hasher fails silently — a wrong digest, never a trap — so
+    # it is checked against an independent SHA-256 rather than left to the browser.
+    - node testdata/verify_wasm_hasher.mjs
 
 # A build the CLI signs must verify under the JavaScript verifier and produce a
 # Service Worker that actually evaluates. Neither is provable from unit tests.

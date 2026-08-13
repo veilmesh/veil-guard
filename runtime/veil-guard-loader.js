@@ -19,6 +19,10 @@
   // no reason to alarm anyone.
   if (!window.isSecureContext) return;
 
+  // Cached manifest — populated once SW reports VALID. Used by patchWasm() to
+  // verify WebAssembly files before they are compiled by the browser.
+  var _manifest = null;
+
   function ensureStyles() {
     if (document.getElementById(STYLE_ID)) return;
     var css = [
@@ -142,6 +146,22 @@
     var data = event.data;
     if (!data || typeof data.type !== 'string') return;
     if (data.type.indexOf('veil-guard:') !== 0) return;
+
+    // When the SW confirms the manifest is valid, fetch and cache it locally so
+    // that patchWasm() can verify .wasm files without a round-trip to the SW.
+    if (data.type === 'veil-guard:state' && data.state === 'VALID' && !_manifest) {
+      if (data.manifest) {
+        // SW now includes the parsed manifest in status replies — use it directly.
+        _manifest = data.manifest;
+      } else {
+        // Older SW build: fetch the manifest ourselves.
+        fetch('/veil-guard-manifest.json', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (m) { _manifest = m; })
+          .catch(function () { /* non-fatal: patchWasm falls back to passthrough */ });
+      }
+    }
+
     render(data);
   });
 
@@ -162,6 +182,72 @@
       }
     });
 
+  // Verify .wasm against the manifest before the browser compiles it.
+  //
+  // Be clear about what this is worth. The manifest reaches this page only in a
+  // `veil-guard:state` message, so the wrapper is armed only while a worker is
+  // controlling the page — and a controlled page had its .wasm fetch verified by
+  // that same worker already. On a first visit, or in a browser without Service
+  // Workers, `_manifest` is null and every call passes straight through.
+  //
+  // What is left is narrow but real: a page keeps running after its worker stops
+  // controlling it — an update that unregisters, storage cleared, the worker
+  // killed and not replaced. Fetches then go straight to the network while this
+  // page still holds the manifest it was given earlier. That window is the only
+  // thing this covers, and it covers it for `instantiateStreaming` alone;
+  // `WebAssembly.instantiate(buffer)` has no response to inspect.
+  //
+  // It is emphatically not a substitute for the worker, and nothing here should
+  // be described as one.
+  (function patchWasm() {
+    if (typeof WebAssembly === 'undefined') return;
+    if (typeof WebAssembly.instantiateStreaming !== 'function') return;
+
+    var _orig = WebAssembly.instantiateStreaming;
+
+    WebAssembly.instantiateStreaming = async function (source, importObject) {
+      var response = await Promise.resolve(source);
+
+      // The manifest describes this origin and no other. Matching a cross-origin
+      // URL on pathname alone would compare somebody else's bytes against our
+      // hashes — always a mismatch, so a third-party wasm module served from a
+      // path that happens to collide would be blocked for no reason.
+      var pathname;
+      try {
+        var parsed = new URL(response.url, location.href);
+        if (parsed.origin !== location.origin) {
+          return _orig.call(this, response, importObject);
+        }
+        pathname = parsed.pathname;
+      } catch (e) {
+        // A Response built in JS has no URL. Nothing to look up.
+        return _orig.call(this, response, importObject);
+      }
+
+      // If the manifest isn't loaded yet, or the path isn't in it, pass through.
+      var entry = _manifest && Array.isArray(_manifest.assets)
+        ? _manifest.assets.find(function (a) { return a.path === pathname; })
+        : null;
+      if (!entry) return _orig.call(this, response, importObject);
+
+      // Wasm requires full bufferisation before compilation anyway, so there's no
+      // streaming benefit to preserve here. Buffer, hash, then compile.
+      var bytes = new Uint8Array(await response.clone().arrayBuffer());
+      var hashBuf = await crypto.subtle.digest('SHA-256', bytes);
+      var hashHex = Array.from(new Uint8Array(hashBuf))
+        .map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+
+      if (hashHex !== entry.sha256) {
+        // Notify the SW so it can broadcast the tamper overlay.
+        var w = navigator.serviceWorker.controller;
+        if (w) w.postMessage({ type: 'veil-guard:wasm-tamper', subject: pathname });
+        throw new TypeError('veil-guard: WebAssembly integrity failure — ' + pathname);
+      }
+
+      return WebAssembly.instantiate(bytes, importObject);
+    };
+  })();
+
   window.veilGuard = {
     status: function () {
       var w = navigator.serviceWorker.controller;
@@ -171,5 +257,6 @@
       var w = navigator.serviceWorker.controller;
       if (w) w.postMessage({ type: 'veil-guard:refresh' });
     },
+    get manifest() { return _manifest; },
   };
 })();

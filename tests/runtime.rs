@@ -162,6 +162,20 @@ fn javascript_conformance_vectors_pass() {
 }
 
 #[test]
+fn javascript_wasm_hasher_passes() {
+    if !node_available() {
+        eprintln!("skipping: node not on PATH");
+        return;
+    }
+    // Also the guard against a hand-pasted WASM_SHA256_B64: `loadWasmHasher`
+    // instantiates the embedded module, so a constant that is not a valid module
+    // fails here rather than in a browser, silently, at the first large response.
+    let (ok, out) = run_node("testdata/verify_wasm_hasher.mjs", &[]);
+    assert!(ok, "the embedded Wasm hasher failed:\n{out}");
+    assert!(out.contains("0 failed"), "{out}");
+}
+
+#[test]
 fn javascript_tier1_policy_passes() {
     if !node_available() {
         eprintln!("skipping: node not on PATH");
