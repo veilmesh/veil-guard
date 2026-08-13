@@ -832,10 +832,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::
 
                     let has_failures = snapshot.findings.iter().any(|f| f.severity <= config.fail_on_severity);
 
+                    #[cfg(feature = "relay-client")]
                     if let Some(relay_url) = &config.relay_push {
                         let snap_val = serde_json::to_value(&snapshot).unwrap_or_default();
                         let _ = crate::relay::push_snapshot(relay_url, &snap_val, config.relay_token.as_deref());
                     }
+
 
                     let status = state.entry(url.clone()).or_insert(TargetStatus {
                         is_failing: false,
@@ -900,10 +902,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("Shutting down veil-guard audit daemon gracefully...");
-                break;
+                return Ok(());
             }
         }
     }
-
-    Ok(())
 }

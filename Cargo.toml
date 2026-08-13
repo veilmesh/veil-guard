@@ -47,7 +47,8 @@ tower-http = { version = "0.6", features = ["cors", "limit"], optional = true }
 default = []
 # The auditor reaches the network, so it is kept off the default path: the signing
 # side stays small enough to review, and nothing that signs can also fetch.
-audit = ["dep:ureq"]
+audit = ["dep:ureq", "dep:tokio", "dep:reqwest"]
+
 # KMS support is optional and brings in async dependencies and SDKs.
 kms = [
     "dep:tokio",
