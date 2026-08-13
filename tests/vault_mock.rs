@@ -107,3 +107,76 @@ fn test_vault_transit_mock() {
 
     server_handle.join().unwrap();
 }
+
+// ------------------------------------------------------------------ negative paths
+//
+// The reason these exist: `sign_vault_transit` returns a signature that goes straight
+// into a threshold bundle. Every way it can return the wrong number of bytes, or a
+// body it did not understand, has to end as an error rather than as something that
+// looks like a signature.
+
+/// Serve one fixed HTTP response and return the address to point the client at.
+fn serve_once(body: &'static str, status: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn vault_signature_of_the_wrong_length_is_refused() {
+    // 32 bytes where Ed25519 needs 64. Accepting it would put a stub into the bundle
+    // and turn a configuration mistake into a manifest nobody can verify.
+    let short = BASE64.encode([7u8; 32]);
+    let body: &'static str =
+        Box::leak(format!(r#"{{"data":{{"signature":"vault:v1:{short}"}}}}"#).into_boxed_str());
+    let addr = serve_once(body, "200 OK");
+
+    let err = sign_vault_transit(b"payload", &addr, "k", Some("t"))
+        .expect_err("a 32-byte Ed25519 signature must be refused");
+    assert!(
+        err.to_string().contains("64"),
+        "the error should say what length was expected, got: {err}"
+    );
+}
+
+#[test]
+fn vault_response_without_a_signature_is_refused() {
+    let addr = serve_once(r#"{"data":{"key_version":1}}"#, "200 OK");
+    let err = sign_vault_transit(b"payload", &addr, "k", Some("t"))
+        .expect_err("a response with no signature field must be refused");
+    assert!(err.to_string().contains("signature"), "got: {err}");
+}
+
+#[test]
+fn vault_signature_without_the_version_prefix_is_refused() {
+    // Vault returns "vault:v1:<base64>". Anything else means we are talking to
+    // something that is not Vault, and guessing at it would be worse than stopping.
+    let raw = BASE64.encode([9u8; 64]);
+    let body: &'static str =
+        Box::leak(format!(r#"{{"data":{{"signature":"{raw}"}}}}"#).into_boxed_str());
+    let addr = serve_once(body, "200 OK");
+
+    let err = sign_vault_transit(b"payload", &addr, "k", Some("t"))
+        .expect_err("an unprefixed signature must be refused");
+    assert!(err.to_string().contains("format"), "got: {err}");
+}
+
+#[test]
+fn vault_permission_denied_is_an_error_not_a_signature() {
+    let addr = serve_once(r#"{"errors":["permission denied"]}"#, "403 Forbidden");
+    assert!(
+        sign_vault_transit(b"payload", &addr, "k", Some("bad-token")).is_err(),
+        "a 403 must not produce a signature"
+    );
+}

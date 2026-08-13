@@ -12,39 +12,52 @@
 Service Worker) from **Origin Server Compromise** (handled, only partially, by the
 out-of-band CLI audit).
 
-Everything in this table describes code that exists in this repository today. Tier 2,
-transparency-log publication and keyless signing are **not built** — they are tracked
-in [`ROADMAP.md`](./ROADMAP.md) and are deliberately absent from the columns below,
-because a threat model that credits unwritten code is worse than no threat model.
+Every cell below describes code in this repository, and the words are chosen
+carefully. **Blocked** means the attack does not reach the page. **Detected** means it
+reaches the page and something tells you afterwards — an icon, a finding, an alert.
+The two are not interchangeable, and a threat model that blurs them is worse than none.
 
-| Attack Scenario | Threat Level | Tier 0 (CLI / SRI / CSP / audit) | Tier 1 (Service Worker) |
-| :--- | :---: | :---: | :---: |
-| **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked |
-| **Dynamic Lazy Route / Wasm Chunk Tampering** (`import()`) | High | ❌ No SRI to apply | ✅ Blocked via SW |
-| **Post-First-Visit External Script Injection** | High | ⚠️ Partial (CSP) | ✅ Blocked via SW |
-| **Post-First-Visit Inline Script Injection** | High | ✅ Blocked via CSP hash | ❌ Unseen by SW `fetch` |
-| **Accidental / Corrupted Deploy** | Medium | ✅ Blocked via SRI | ✅ Blocked via SW |
-| **Initial Origin Compromise** (evil HTML on 1st visit) | Critical | ⚠️ Detectable after the fact via `audit` | ❌ SW not installed yet |
-| **Origin Compromise via Evil `sw.js` Replacement** | Critical | ⚠️ Detectable after the fact via `audit` | ❌ SW replaced |
-| **Signer Private Key Theft** | Critical | ⚠️ One key is not enough: 2-of-3 threshold (§4.4) | ⚠️ Same |
-| **Threshold of Signer Keys Stolen** | Critical | ❌ Indistinguishable from a legitimate build | ❌ Same |
-| **Targeted Malicious Delivery** (bad bundle to some visitors) | Critical | ⚠️ Detectable via multi-vantage `audit` + `diff` | ❌ |
+| Attack Scenario | Level | Tier 0 (CLI / SRI / CSP / audit) | Tier 1 (Service Worker) | Tier 2 (extension) |
+| :--- | :---: | :---: | :---: | :---: |
+| **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked | ✅ Blocked (via Tier 1) |
+| **Dynamic Lazy Route / Wasm Chunk Tampering** (`import()`) | High | ❌ No SRI to apply | ✅ Blocked via SW | ✅ Blocked (via Tier 1) |
+| **Post-First-Visit External Script Injection** | High | ⚠️ Partial (CSP) | ✅ Blocked via SW | ✅ Blocked (via Tier 1) |
+| **Post-First-Visit Inline Script Injection** | High | ✅ Blocked via CSP hash | ❌ Unseen by SW `fetch` | ❌ Same |
+| **Accidental / Corrupted Deploy** | Medium | ✅ Blocked via SRI | ✅ Blocked via SW | ✅ Blocked |
+| **Initial Origin Compromise** (evil HTML on 1st visit) | Critical | ⚠️ Detected after the fact via `audit` | ❌ SW not installed yet | 🦊 Blocked on Firefox · ⚠️ Detected on Chrome |
+| **Origin Compromise via Evil `sw.js` Replacement** | Critical | ⚠️ Detected after the fact via `audit` | ❌ SW replaced | ⚠️ Detected, then the origin is blocked |
+| **`Clear-Site-Data` evicts the worker** | High | ❌ | ❌ SW cleared | ⚠️ Detected |
+| **Signer Private Key Theft** | Critical | ⚠️ One key is not enough: 2-of-3 threshold (§4.4) | ⚠️ Same | ✅ Revocable out-of-band (§9.2) |
+| **Threshold of Signer Keys Stolen** | Critical | ❌ Indistinguishable from a legitimate build | ❌ Same | ❌ Same — rotate, do not revoke |
+| **Targeted Malicious Delivery** (bad bundle to some visitors) | Critical | ⚠️ Detected via multi-vantage `audit` + `diff` | ❌ | ⚠️ Detected |
 
-"Detectable after the fact" means exactly that: the attack succeeds against whoever
-loads the page, and `veil-guard audit` tells you afterwards — if you are running it.
-It is not prevention.
+Two entries need their footnotes read.
 
-### Not built yet
+**Firefox blocks the first visit; Chrome cannot.** `webRequest.filterResponseData`
+lets the extension buffer a response, hash it, and refuse to release a single byte if
+the digest is wrong. Chrome's MV3 has no equivalent — `declarativeNetRequest` never
+sees a response body — so there the extension verifies the worker file out-of-band,
+raises an interstitial and blocks the origin going forward. That is detection followed
+by containment, not prevention, and the table says so.
 
-Named here because they appear in the architecture diagram, the roadmap, and the
-prior art, and their absence changes what the tool protects:
+**"Detected, then the origin is blocked"** means the extension's background worker
+fetches `veil-guard-sw.js` itself, outside any page's Service Worker, compares it with
+the signed manifest, and on a mismatch adds a blocking rule for the origin, posts a
+system notification and redirects the tab to an interstitial. The page that already
+loaded is not un-loaded.
 
-- **Tier 2 browser extension.** The only design that can cover the first visit and a
-  replaced Service Worker. Until it ships, both rows above stay `❌ / ⚠️`.
-- **Transparency log publication (Rekor) and keyless OIDC signing.** Would make a
-  stolen-key signature publicly discoverable. Nothing in this repo talks to a log.
+### What is deliberately still absent
 
-> **Prior Art Acknowledgments:** `veil-guard` draws architectural inspiration from **Meta Code Verify** (WhatsApp Web / Cloudflare) and **WEBCAT** (Freedom of the Press Foundation). Both implement the Tier 2 extension that this project has not built.
+- **Keyless / OIDC signing (Fulcio).** Identities are long-lived keys today. Short-lived
+  certificates tied to a workload identity would remove the standing key entirely.
+- **Reproducible builds.** The manifest's `source` block is a claim by the signer, not
+  a proof that the bytes came from any particular tree (`SPEC.md` §1).
+- **Cryptographic Rekor verification.** `audit --rekor-lookup` re-reads a published
+  entry and compares the hash; it does **not** verify the log's signed entry timestamp
+  or an inclusion proof, so the guarantee is only as good as the endpoint answering.
+  Called out again under [Transparency log](#-transparency-log-rekor) below.
+
+> **Prior Art Acknowledgments:** `veil-guard` draws architectural inspiration from **Meta Code Verify** (WhatsApp Web / Cloudflare) and **WEBCAT** (Freedom of the Press Foundation).
 
 ---
 
@@ -58,7 +71,7 @@ prior art, and their absence changes what the tool protects:
 |  1. NFC Unicode & Path Normalization (macOS NFD -> NFC, Windows '\' -> '/')        |
 |  2. Binary Hashing: SHA-256 (Manifest/CSP) & SHA-384 (SRI)                         |
 |  3. Monotonic Build Unix-Timestamp Versioning & Expiry                             |
-|  4. Key Rotation: Chain-of-Trust signed statements (revocation: SPEC only)         |
+|  4. Key Rotation & Revocation: Chain-of-Trust signed statements (§9.1, §9.2)       |
 |  5. Dual Signing: Ed25519 (verify_strict) AND ECDSA P-256 (WebCrypto)              |
 |  6. Multi-Page HTML SRI Injection & Per-Page CSP Hash Generators                   |
 |  7. Config Generators: Integrity-Policy & Server Headers (Nginx/Caddy/Netlify)     |
@@ -78,7 +91,15 @@ prior art, and their absence changes what the tool protects:
                                           |
                                           v
 +------------------------------------------------------------------------------------+
-|            TIER 2: Out-of-Band Browser Extension  — NOT BUILT (ROADMAP §3)          |
+|                      TIER 2: Out-of-Band Browser Extension                          |
+|                                                                                     |
+|  MV3 extension (veilmesh/veil-guard-ext), Chrome 111+ / Firefox 128+:               |
+|  1. Trust root from a bundled registry, MDM policy or a federated feed — never      |
+|     from the origin being checked. First-visit pinning is shown as TOFU, not green. |
+|  2. Background verification of veil-guard-sw.js, fetched outside any page worker    |
+|  3. Out-of-band revocation (§9.2), the one mechanism SPEC assigns to this tier      |
+|  4. Firefox: response bodies verified before release (filterResponseData)           |
+|  5. Chrome: detection, then a blocking rule for the origin and an interstitial      |
 +------------------------------------------------------------------------------------+
 ```
 
@@ -332,6 +353,31 @@ Automates installation and signing inside GitHub Actions pipelines.
     AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
+
+---
+
+## 🔎 Transparency log (Rekor)
+
+`sign --rekor-upload` publishes the manifest hash and signature to a Sigstore Rekor
+instance and records the returned log index in `source.rekor`.
+`audit --rekor-lookup` reads that index back and checks the recorded hash matches.
+
+**Read the name of the flag literally.** It is a lookup:
+
+- ✅ It proves the hash was published, and that the endpoint you asked still reports
+  the same one. That is enough to notice a manifest quietly swapped after the fact.
+- ❌ It does **not** verify the log's signed entry timestamp, does not check an
+  inclusion proof against a signed tree head, and does not pin the log's public key.
+
+Which means the answer is worth exactly as much as the endpoint at `--rekor-url`.
+Anyone who can redirect that URL, or sit on the network path, can fabricate the whole
+reply. Against an attacker, this is not yet a transparency guarantee — it is a
+publication record. Closing that gap is tracked in [`ROADMAP.md`](./ROADMAP.md); it
+needs SET verification with a pinned log key, and inclusion-proof checking against a
+checkpoint.
+
+The finding the auditor emits says the same thing, so nobody reading a report has to
+come back here for it.
 
 ---
 

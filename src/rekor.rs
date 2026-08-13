@@ -117,7 +117,7 @@ pub fn upload_manifest(
 }
 
 /// Verify a Rekor entry by log_index or entry_id.
-pub fn verify_rekor_entry(
+pub fn lookup_rekor_entry(
     manifest_bytes: &[u8],
     rekor_entry: &RekorEntry,
     rekor_url: &str,
@@ -161,7 +161,7 @@ pub fn verify_rekor_entry(
 
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
-        .user_agent("veil-guard (rekor-verifier)")
+        .user_agent("veil-guard (rekor-lookup)")
         .build();
     let agent: ureq::Agent = config.into();
 

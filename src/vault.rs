@@ -65,11 +65,18 @@ pub fn sign_vault_transit(
         .as_str()
         .ok_or("Vault response missing data.signature field")?;
 
-    // Vault returns signature format like "vault:v1:<base64>"
+    // Vault transit returns "vault:v<N>:<base64>". Require that shape rather than
+    // taking whatever follows the last colon: `rsplit(':').next()` yields the whole
+    // string when there is no colon at all, so the guard below used to be
+    // unreachable and any 64 base64 bytes from any endpoint would have been accepted
+    // as a signature. Being strict here is how a misconfigured URL fails loudly.
     let raw_b64 = sig_str
-        .rsplit(':')
-        .next()
-        .ok_or_else(|| format!("Invalid Vault signature format: {sig_str}"))?;
+        .strip_prefix("vault:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(_version, b64)| b64)
+        .ok_or_else(|| {
+            format!("Invalid Vault signature format, expected `vault:v<N>:<base64>`: {sig_str}")
+        })?;
 
     let sig_bytes = BASE64
         .decode(raw_b64)

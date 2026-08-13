@@ -126,3 +126,75 @@ fn test_relay_push_pull_diff_roundtrip() {
     let _ = fs::remove_dir_all(&tmp_dir);
     server_handle.join().unwrap();
 }
+
+// ------------------------------------------------------------------ negative paths
+//
+// The relay is how several vantage points compare notes, and `diff` between them is
+// the only signal that reveals a bundle served to some visitors and not others. A
+// relay that is down, or that answers with something other than snapshots, must stop
+// the audit rather than look like agreement.
+
+use std::net::TcpListener as L;
+use std::thread as T;
+
+fn respond(body: &'static str, status: &'static str) -> String {
+    let l = L::bind("127.0.0.1:0").expect("bind");
+    let port = l.local_addr().unwrap().port();
+    T::spawn(move || {
+        if let Ok((mut s, _)) = l.accept() {
+            let mut b = [0u8; 8192];
+            let _ = s.read(&mut b);
+            let _ = s.write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn pushing_to_an_unreachable_relay_is_an_error() {
+    let snap = serde_json::json!({ "url": "https://example.invalid" });
+    assert!(
+        push_snapshot("http://127.0.0.1:1", &snap, None).is_err(),
+        "a relay that is not listening must not look like a successful push"
+    );
+}
+
+#[test]
+fn a_rejected_push_is_an_error() {
+    let addr = respond(r#"{"error":"unauthorized"}"#, "401 Unauthorized");
+    let snap = serde_json::json!({ "url": "https://example.invalid" });
+    assert!(
+        push_snapshot(&addr, &snap, Some("wrong-token")).is_err(),
+        "a 401 must surface; a snapshot nobody stored is not a snapshot"
+    );
+}
+
+#[test]
+fn pulling_from_an_unreachable_relay_is_an_error() {
+    assert!(
+        pull_snapshots(
+            "http://127.0.0.1:1",
+            "example.invalid",
+            None,
+            &std::env::temp_dir(),
+            None
+        )
+        .is_err(),
+        "an unreachable relay must not read as zero divergences"
+    );
+}
+
+#[test]
+fn a_relay_answering_with_junk_is_an_error() {
+    let addr = respond("not json at all", "200 OK");
+    assert!(
+        pull_snapshots(&addr, "example.invalid", None, &std::env::temp_dir(), None).is_err(),
+        "an unparseable body must not read as zero divergences"
+    );
+}

@@ -39,10 +39,15 @@ jobs:
       # cannot be exercised without credentials.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features audit -- -D warnings
-      - run: cargo clippy --all-targets --features audit,kms -- -D warnings
+      # Every optional feature at once. Five of these — vault, rekor, the two relay
+      # halves and the telemetry server — went in unlinted by CI.
+      - run: cargo clippy --all-targets --features audit,kms,vault,rekor,relay-client,relay-server,telemetry-server -- -D warnings
 
       - run: cargo test --all-targets
       - run: cargo test --all-targets --features audit
+      # Tests for vault, rekor, relay and telemetry sit behind their own cfgs; without
+      # this line they compile to zero tests and report success.
+      - run: cargo test --all-targets --features audit,kms,vault,rekor,relay-client,relay-server,telemetry-server
 
   # SPEC.md §11: the conformance vectors are only meaningful if a second,
   # independent implementation is held to them. These are the JavaScript side.

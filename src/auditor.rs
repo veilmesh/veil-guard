@@ -223,7 +223,7 @@ pub struct AuditOptions {
     pub graph_only: bool,
     pub timeout: Duration,
     pub max_body: u64,
-    pub rekor_verify: bool,
+    pub rekor_lookup: bool,
     pub rekor_url: String,
 }
 
@@ -235,7 +235,7 @@ impl Default for AuditOptions {
             graph_only: false,
             timeout: Duration::from_secs(30),
             max_body: 64 * 1024 * 1024,
-            rekor_verify: false,
+            rekor_lookup: false,
             rekor_url: "https://rekor.sigstore.dev".to_string(),
         }
     }
@@ -376,7 +376,7 @@ pub fn audit(
     snapshot.manifest_version = Some(manifest.version);
     snapshot.assets_in_manifest = manifest.assets.len();
 
-    if opts.rekor_verify || manifest.source.get("rekor").is_some() {
+    if opts.rekor_lookup || manifest.source.get("rekor").is_some() {
         #[cfg(feature = "rekor")]
         {
             if let Some(rekor_val) = manifest.source.get("rekor") {
@@ -393,7 +393,7 @@ pub fn audit(
                             .unwrap_or_default()
                             .to_string(),
                     };
-                    match crate::rekor::verify_rekor_entry(
+                    match crate::rekor::lookup_rekor_entry(
                         &manifest_res.body,
                         &entry,
                         &opts.rekor_url,
@@ -401,9 +401,13 @@ pub fn audit(
                         Ok(true) => {
                             findings.push(Finding::new(
                                 Severity::Info,
-                                "rekor-verified",
+                                "rekor-entry-found",
                                 base.clone(),
-                                format!("manifest hash verified in Rekor log_index={log_idx}"),
+                                format!(
+                                    "Rekor log_index={log_idx} records this manifest hash. \
+                                     The log's signature and inclusion proof were not checked, \
+                                     so this confirms publication, not immutability."
+                                ),
                             ));
                         }
                         Ok(false) => {
@@ -417,14 +421,14 @@ pub fn audit(
                         Err(e) => {
                             findings.push(Finding::new(
                                 Severity::Warning,
-                                "rekor-verification-failed",
+                                "rekor-lookup-failed",
                                 base.clone(),
                                 format!("failed to query Rekor log_index={log_idx}: {e}"),
                             ));
                         }
                     }
                 }
-            } else if opts.rekor_verify {
+            } else if opts.rekor_lookup {
                 findings.push(Finding::new(
                     Severity::Warning,
                     "rekor-not-found",
@@ -435,7 +439,7 @@ pub fn audit(
         }
         #[cfg(not(feature = "rekor"))]
         {
-            if opts.rekor_verify {
+            if opts.rekor_lookup {
                 findings.push(Finding::new(
                     Severity::Warning,
                     "rekor-disabled",
@@ -765,7 +769,7 @@ pub struct DaemonConfig {
     pub label: Option<String>,
     pub pinned_version: u64,
     pub graph_only: bool,
-    pub rekor_verify: bool,
+    pub rekor_lookup: bool,
     pub rekor_url: String,
     pub relay_push: Option<String>,
     pub relay_token: Option<String>,
@@ -804,7 +808,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::
                         label: config.label.clone(),
                         pinned_version: config.pinned_version,
                         graph_only: config.graph_only,
-                        rekor_verify: config.rekor_verify,
+                        rekor_lookup: config.rekor_lookup,
                         rekor_url: config.rekor_url.clone(),
                         ..Default::default()
                     };

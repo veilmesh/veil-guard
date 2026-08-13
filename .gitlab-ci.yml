@@ -41,7 +41,10 @@ lint:
     # be exercised without credentials. Compile-and-lint is the honest ceiling here.
     - cargo clippy --all-targets -- -D warnings
     - cargo clippy --all-targets --features audit -- -D warnings
-    - cargo clippy --all-targets --features audit,kms -- -D warnings
+    # Every optional feature at once. Five of these — vault, rekor, the two relay
+    # halves and the telemetry server — went in unlinted by CI and only stayed clean
+    # by luck; each is a network protocol whose failure mode is quiet.
+    - cargo clippy --all-targets --features audit,kms,vault,rekor,relay-client,relay-server,telemetry-server -- -D warnings
 
 test:rust:
   extends: .rust
@@ -49,6 +52,9 @@ test:rust:
   script:
     - cargo test --all-targets
     - cargo test --all-targets --features audit
+    # The tests for vault, rekor, relay and telemetry are behind their own cfgs, so
+    # without this line they compile to zero tests and report success.
+    - cargo test --all-targets --features audit,kms,vault,rekor,relay-client,relay-server,telemetry-server
     # Handed to the integration stage so the Node job does not need a Rust
     # toolchain just to exercise the binary.
     - cargo build --release --features audit

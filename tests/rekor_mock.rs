@@ -8,7 +8,7 @@ use sha2::Digest;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
-use veil_guard::rekor::{ed25519_pubkey_to_pem, upload_manifest, verify_rekor_entry};
+use veil_guard::rekor::{ed25519_pubkey_to_pem, lookup_rekor_entry, upload_manifest};
 
 #[test]
 fn test_rekor_mock_flow() {
@@ -133,11 +133,11 @@ fn test_rekor_mock_flow() {
     assert_eq!(entry.integrated_time, 1754726400);
 
     let is_valid =
-        verify_rekor_entry(&manifest_bytes, &entry, &rekor_url).expect("verify rekor entry");
+        lookup_rekor_entry(&manifest_bytes, &entry, &rekor_url).expect("verify rekor entry");
 
     assert!(is_valid);
 
-    // Verify B1 fix: verify_rekor_entry when manifest_bytes has source.rekor attached
+    // Verify B1 fix: lookup_rekor_entry when manifest_bytes has source.rekor attached
     let manifest_with_rekor = serde_json::json!({
         "test": "manifest",
 
@@ -153,13 +153,96 @@ fn test_rekor_mock_flow() {
     let manifest_with_rekor_bytes =
         (serde_json::to_string_pretty(&manifest_with_rekor).unwrap() + "\n").into_bytes();
 
-    let is_valid_with_rekor = verify_rekor_entry(&manifest_with_rekor_bytes, &entry, &rekor_url)
+    let is_valid_with_rekor = lookup_rekor_entry(&manifest_with_rekor_bytes, &entry, &rekor_url)
         .expect("verify rekor entry with source.rekor");
 
     assert!(
         is_valid_with_rekor,
-        "B1 fix: verify_rekor_entry must strip source.rekor before computing hash!"
+        "B1 fix: lookup_rekor_entry must strip source.rekor before computing hash!"
     );
 
     server_handle.join().unwrap();
+}
+
+// ------------------------------------------------------------------ negative paths
+//
+// `lookup_rekor_entry` is a lookup, not a proof — it trusts whatever the endpoint at
+// `--rekor-url` returns. That makes its failure modes the only thing standing between
+// a wrong answer and an INFO finding that reads like reassurance, so each one gets a
+// test: a log that records a different hash, a log that answers with nothing useful,
+// and a log that is not there at all.
+
+use std::net::TcpListener as Listener;
+use std::thread as th;
+
+fn serve_json(body: String, status: &'static str) -> String {
+    let listener = Listener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    th::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A Rekor `entries?logIndex=` response whose body records `hash`.
+fn rekor_response_recording(hash: &str) -> String {
+    let body = serde_json::json!({
+        "kind": "hashedrekord",
+        "apiVersion": "0.0.1",
+        "spec": { "data": { "hash": { "algorithm": "sha256", "value": hash } } }
+    });
+    let b64 = BASE64.encode(serde_json::to_vec(&body).unwrap());
+    format!(r#"{{"someuuid":{{"logIndex":42,"body":"{b64}"}}}}"#)
+}
+
+fn entry() -> veil_guard::rekor::RekorEntry {
+    veil_guard::rekor::RekorEntry {
+        log_index: 42,
+        integrated_time: 1_754_726_400,
+        log_id: "log".into(),
+        entry_id: "someuuid".into(),
+    }
+}
+
+#[test]
+fn a_log_recording_a_different_hash_is_not_a_match() {
+    // The whole point of the lookup. If this returned true, a manifest could be
+    // published once and then swapped, and the audit would still say "recorded".
+    let addr = serve_json(rekor_response_recording(&"11".repeat(32)), "200 OK");
+    let matched = lookup_rekor_entry(br#"{"spec":"veil-guard/1"}"#, &entry(), &addr)
+        .expect("the query itself succeeds");
+    assert!(!matched, "a mismatched hash must not report as recorded");
+}
+
+#[test]
+fn a_response_without_an_entry_body_is_an_error_not_a_match() {
+    let addr = serve_json(r#"{"someuuid":{"logIndex":42}}"#.to_string(), "200 OK");
+    assert!(
+        lookup_rekor_entry(b"{}", &entry(), &addr).is_err(),
+        "a body-less entry must be an error, never a silent false"
+    );
+}
+
+#[test]
+fn an_empty_response_object_is_an_error() {
+    let addr = serve_json("{}".to_string(), "200 OK");
+    assert!(lookup_rekor_entry(b"{}", &entry(), &addr).is_err());
+}
+
+#[test]
+fn an_unreachable_log_is_an_error_not_a_match() {
+    // Nothing listening. An audit must report that it could not check, rather than
+    // quietly deciding the entry is absent.
+    assert!(
+        lookup_rekor_entry(b"{}", &entry(), "http://127.0.0.1:1").is_err(),
+        "an unreachable log must surface as an error"
+    );
 }

@@ -240,9 +240,15 @@ enum Commands {
         /// Print the snapshot as JSON on stdout
         #[arg(long)]
         json: bool,
-        /// Verify Rekor transparency log inclusion proof if present in manifest source
+        /// Re-read the manifest's Rekor entry and compare hashes.
+        ///
+        /// This is a lookup, not a proof. It asks the endpoint at `--rekor-url` what
+        /// it has at the recorded log index and checks that the hash agrees. The
+        /// log's signed entry timestamp is not verified and no inclusion proof is
+        /// checked, so the answer is worth exactly as much as that endpoint — see
+        /// README, "Transparency log".
         #[arg(long)]
-        rekor_verify: bool,
+        rekor_lookup: bool,
         /// Rekor log server URL
         #[arg(long, default_value = "https://rekor.sigstore.dev")]
         rekor_url: String,
@@ -749,10 +755,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("private  {}", priv_path.display());
             println!("public   {}", pub_path.display());
 
-            if kf.kms_key_id.is_some() {
-                println!("\nThe P-256 half of this signer never existed on this machine. The");
-                println!("Ed25519 half did, and still sits in the file above — SPEC.md §4.6");
-                println!("calls that partial custody, not the finished article.");
+            // Say which halves actually left the machine. An operator who is told
+            // "partial custody" when custody is in fact complete stops believing the
+            // tool, and one told the reverse stops taking the warning seriously.
+            match (kf.p256_private_pkcs8.is_none(), kf.ed25519_seed.is_none()) {
+                (true, true) => {
+                    println!("\nNeither private half of this signer exists on this machine, and");
+                    println!("neither is in the file above. This is the custody SPEC.md §4.6");
+                    println!("asks for: a runner that is compromised whole still cannot sign.");
+                }
+                (true, false) => {
+                    println!("\nThe P-256 half of this signer never existed on this machine. The");
+                    println!("Ed25519 half did, and still sits in the file above — SPEC.md §4.6");
+                    println!("calls that partial custody, not the finished article. Move it to a");
+                    println!("Vault transit key with --vault-addr to finish the job.");
+                }
+                (false, true) => {
+                    println!("\nThe Ed25519 half of this signer is remote; the P-256 half is in");
+                    println!("the file above. SPEC.md §4.6 calls that partial custody. Move it");
+                    println!("to a KMS with --p256-public-der and --kms-key-id.");
+                }
+                (false, false) => {}
             }
             if role == "recovery" {
                 println!("\nThis is a recovery key, and it has just been written to this disk");
@@ -1212,7 +1235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_on,
             out,
             json,
-            rekor_verify,
+            rekor_lookup,
             rekor_url,
             relay_push,
             relay_token,
@@ -1243,7 +1266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     label,
                     pinned_version,
                     graph_only,
-                    rekor_verify,
+                    rekor_lookup,
                     rekor_url,
                     relay_push,
                     relay_token,
@@ -1264,7 +1287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     label,
                     pinned_version,
                     graph_only,
-                    rekor_verify,
+                    rekor_lookup,
                     rekor_url,
                     ..Default::default()
                 },
