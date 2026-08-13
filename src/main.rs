@@ -69,6 +69,18 @@ enum Commands {
         /// Provider for `--kms-key-id`; inferred from the key ID when omitted
         #[arg(long, value_parser = ["aws", "gcp"], requires = "kms_key_id")]
         kms_provider: Option<String>,
+
+        /// Address of HashiCorp Vault server for remote Ed25519 signing (SPEC §4.6)
+        #[arg(long)]
+        vault_addr: Option<String>,
+
+        /// Key name in HashiCorp Vault transit engine
+        #[arg(long, requires = "vault_addr")]
+        vault_key_name: Option<String>,
+
+        /// Hex-encoded 32-byte Ed25519 public key (required if --vault-addr is used)
+        #[arg(long, requires = "vault_addr")]
+        ed25519_public_hex: Option<String>,
     },
 
     /// Assemble a trust root from signer key files
@@ -155,6 +167,14 @@ enum Commands {
         /// KMS provider to use
         #[arg(long, value_parser = ["aws", "gcp"])]
         kms_provider: Option<String>,
+
+        /// Upload manifest hash and signature to Sigstore Rekor transparency log
+        #[arg(long)]
+        rekor_upload: bool,
+
+        /// Rekor log server URL
+        #[arg(long, default_value = "https://rekor.sigstore.dev")]
+        rekor_url: String,
     },
 
     /// Emit the Tier 1 runtime with a trust root baked in
@@ -212,6 +232,25 @@ enum Commands {
         /// Print the snapshot as JSON on stdout
         #[arg(long)]
         json: bool,
+        /// Verify Rekor transparency log inclusion proof if present in manifest source
+        #[arg(long)]
+        rekor_verify: bool,
+        /// Rekor log server URL
+        #[arg(long, default_value = "https://rekor.sigstore.dev")]
+        rekor_url: String,
+        /// Automatically push snapshot to relay server URL after audit completes
+        #[arg(long)]
+        relay_push: Option<String>,
+        /// Bearer token for relay push
+        #[arg(long, env = "VEIL_RELAY_TOKEN")]
+        relay_token: Option<String>,
+    },
+
+    /// Manage third-party audit relay: push or pull snapshots across vantage points
+    #[cfg(feature = "relay-client")]
+    Relay {
+        #[command(subcommand)]
+        action: RelayAction,
     },
 
     /// Compare two audit snapshots
@@ -267,6 +306,38 @@ enum Commands {
     },
 }
 
+#[cfg(feature = "relay-client")]
+#[derive(clap::Subcommand, Debug)]
+pub enum RelayAction {
+    /// Push an audit snapshot to a relay server
+    Push {
+        /// Local snapshot JSON file to push
+        #[arg(short, long)]
+        snapshot: PathBuf,
+        /// Relay server URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        relay_url: String,
+        /// Bearer authentication token
+        #[arg(long, env = "VEIL_RELAY_TOKEN")]
+        token: Option<String>,
+    },
+    /// Pull snapshots for a domain from a relay server
+    Pull {
+        /// Audited domain name (e.g. app.example.com)
+        #[arg(short, long)]
+        domain: String,
+        /// Relay server URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        relay_url: String,
+        /// Output directory to write fetched snapshot JSON files into
+        #[arg(short, long, default_value = "relay-snapshots")]
+        out_dir: PathBuf,
+        /// Filter snapshots created after this Unix timestamp
+        #[arg(long)]
+        since: Option<u64>,
+    },
+}
+
 /// On-disk signer identity.
 ///
 /// NOTE: written unencrypted with mode 0600. Passphrase encryption is not
@@ -292,6 +363,10 @@ struct KeyFile {
     kms_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kms_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vault_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vault_key_name: Option<String>,
 }
 
 impl Drop for KeyFile {
@@ -350,19 +425,44 @@ impl KeyFile {
         let key_id_bytes = veil_guard::crypto::unhex_array::<8>(&self.key_id)?;
 
         // 1. Ed25519 signature
-        let seed = self
-            .ed25519_seed
-            .as_ref()
-            .ok_or("key file has no Ed25519 private seed")?;
-        let seed_bytes = veil_guard::crypto::unhex_array::<32>(seed)?;
-        let ed_signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
-        let ed_sig = ed_signing_key.sign(&msg);
+        if self.ed25519_seed.is_some() && self.vault_key_name.is_some() {
+            return Err(format!(
+                "signer {} has both a local Ed25519 seed and a vault_key_name; \
+                 remove one — as written, the local key would be used and Vault ignored",
+                self.key_id
+            )
+            .into());
+        }
 
-        entries.push(SigEntry {
-            key_id: key_id_bytes,
-            alg_id: SigAlg::Ed25519.alg_id(),
-            sig: ed_sig.to_bytes().to_vec(),
-        });
+        if let Some(seed) = &self.ed25519_seed {
+            let seed_bytes = veil_guard::crypto::unhex_array::<32>(seed)?;
+            let ed_signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+            let ed_sig = ed_signing_key.sign(&msg);
+            entries.push(SigEntry {
+                key_id: key_id_bytes,
+                alg_id: SigAlg::Ed25519.alg_id(),
+                sig: ed_sig.to_bytes().to_vec(),
+            });
+        } else if let Some(v_key) = &self.vault_key_name {
+            let v_addr = self.vault_addr.as_deref().ok_or_else(|| {
+                format!(
+                    "signer {} has vault_key_name but missing vault_addr",
+                    self.key_id
+                )
+            })?;
+            let sig_bytes = sign_with_vault(&msg, v_addr, v_key)?;
+            entries.push(SigEntry {
+                key_id: key_id_bytes,
+                alg_id: SigAlg::Ed25519.alg_id(),
+                sig: sig_bytes,
+            });
+        } else {
+            return Err(format!(
+                "signer {} has no Ed25519 private seed and no Vault key to sign with.",
+                self.key_id
+            )
+            .into());
+        }
 
         // 2. P-256 signature
         //
@@ -461,6 +561,21 @@ fn sign_with_kms(
     }
 }
 
+fn sign_with_vault(
+    _msg: &[u8],
+    _vault_addr: &str,
+    _vault_key_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    #[cfg(feature = "vault")]
+    {
+        veil_guard::vault::sign_vault_transit(_msg, _vault_addr, _vault_key_name, None)
+    }
+    #[cfg(not(feature = "vault"))]
+    {
+        Err("Vault support is disabled. Rebuild with --features vault to enable.".into())
+    }
+}
+
 fn read_key_file(path: &Path) -> Result<KeyFile, Box<dyn std::error::Error>> {
     let kf: KeyFile = serde_json::from_slice(&fs::read(path)?)?;
     if kf.spec != "veil-guard/key/1" {
@@ -495,42 +610,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p256_public_der,
             kms_key_id,
             kms_provider,
+            vault_addr,
+            vault_key_name,
+            ed25519_public_hex,
         } => {
             fs::create_dir_all(&out_dir)?;
 
-            // Two shapes of signer. Both have an Ed25519 keypair generated here;
-            // they differ in whether the P-256 private half exists locally at all.
             let signer = SignerKeys::generate();
-            let kf = match &p256_public_der {
-                None => KeyFile {
-                    spec: "veil-guard/key/1".into(),
-                    role: role.clone(),
-                    key_id: hex::encode(signer.key_id()),
-                    ed25519_public: hex::encode(signer.ed25519_public()),
-                    p256_public: hex::encode(signer.p256_public()),
-                    ed25519_seed: Some(hex::encode(signer.ed25519_seed())),
-                    p256_private_pkcs8: Some(hex::encode(signer.p256_pkcs8_der()?)),
-                    kms_key_id: None,
-                    kms_provider: None,
-                },
+
+            let (ed_public, ed_seed) = match &vault_addr {
+                Some(_v_addr) => {
+                    let _v_key = vault_key_name
+                        .clone()
+                        .ok_or("--vault-addr requires --vault-key-name")?;
+                    let hex_str = ed25519_public_hex.as_ref().ok_or(
+                        "--vault-addr requires --ed25519-public-hex (32-byte hex Ed25519 public key)",
+                    )?;
+                    let pub_bytes = veil_guard::crypto::unhex_array::<32>(hex_str)?;
+                    (pub_bytes, None)
+                }
+                None => (
+                    signer.ed25519_public(),
+                    Some(hex::encode(signer.ed25519_seed())),
+                ),
+            };
+
+            let (p256_public, p256_priv_pkcs8, kms_id, kms_prov) = match &p256_public_der {
+                None => (
+                    signer.p256_public(),
+                    Some(hex::encode(signer.p256_pkcs8_der()?)),
+                    None,
+                    None,
+                ),
                 Some(der_path) => {
-                    let kms_key_id = kms_key_id
+                    let kms_id = kms_key_id
                         .clone()
                         .ok_or("--p256-public-der needs --kms-key-id: without it nothing can sign this signer's P-256 half")?;
-                    let p256_public = read_p256_public_der(der_path)?;
-                    let ed_public = signer.ed25519_public();
-                    KeyFile {
-                        spec: "veil-guard/key/1".into(),
-                        role: role.clone(),
-                        key_id: hex::encode(veil_guard::crypto::key_id(&ed_public, &p256_public)),
-                        ed25519_public: hex::encode(ed_public),
-                        p256_public: hex::encode(p256_public),
-                        ed25519_seed: Some(hex::encode(signer.ed25519_seed())),
-                        p256_private_pkcs8: None,
-                        kms_key_id: Some(kms_key_id),
-                        kms_provider: kms_provider.clone(),
-                    }
+                    let p256_pub = read_p256_public_der(der_path)?;
+                    (p256_pub, None, Some(kms_id), kms_provider.clone())
                 }
+            };
+
+            let key_id = veil_guard::crypto::key_id(&ed_public, &p256_public);
+
+            let kf = KeyFile {
+                spec: "veil-guard/key/1".into(),
+                role: role.clone(),
+                key_id: hex::encode(key_id),
+                ed25519_public: hex::encode(ed_public),
+                p256_public: hex::encode(p256_public),
+                ed25519_seed: ed_seed,
+                p256_private_pkcs8: p256_priv_pkcs8,
+                kms_key_id: kms_id,
+                kms_provider: kms_prov,
+                vault_addr: vault_addr.clone(),
+                vault_key_name: vault_key_name.clone(),
             };
 
             let priv_path = out_dir.join(format!("{name}.key.json"));
@@ -550,22 +684,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // carrying it through keeps a remote signer recognisable there.
                 kms_key_id: kf.kms_key_id.clone(),
                 kms_provider: kf.kms_provider.clone(),
+                vault_addr: kf.vault_addr.clone(),
+                vault_key_name: kf.vault_key_name.clone(),
             };
             let pub_path = out_dir.join(format!("{name}.pub.json"));
             fs::write(&pub_path, serde_json::to_string_pretty(&pub_kf)? + "\n")?;
 
             println!("signer   {}  ({role})", pub_kf.key_id);
-            match &kf.kms_key_id {
-                Some(id) => {
-                    println!("p256     remote — {id}");
-                    println!(
-                        "private  {}  (mode 0600, Ed25519 seed only, UNENCRYPTED)",
-                        priv_path.display()
-                    );
-                }
-                None => println!("private  {}  (mode 0600, UNENCRYPTED)", priv_path.display()),
+            if let Some(id) = &kf.kms_key_id {
+                println!("p256     remote — {id}");
             }
+            if let Some(key) = &kf.vault_key_name {
+                println!("ed25519  remote — Vault key {key}");
+            }
+            println!("private  {}", priv_path.display());
             println!("public   {}", pub_path.display());
+
             if kf.kms_key_id.is_some() {
                 println!("\nThe P-256 half of this signer never existed on this machine. The");
                 println!("Ed25519 half did, and still sits in the file above — SPEC.md §4.6");
@@ -624,9 +758,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             provenance_json,
             kms_key_id,
             kms_provider,
+            rekor_upload,
+            rekor_url,
         } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
+            let _ = &rekor_url;
 
             // SPEC §10 step 1–2.
             let mut assets = veil_guard::scanner::scan_dist(&dist)?;
@@ -797,6 +934,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manifest_path = dist.join("veil-guard-manifest.json");
             fs::write(&manifest_path, &payload)?;
             fs::write(dist.join("veil-guard-manifest.sig"), &bundle)?;
+
+            #[cfg(feature = "rekor")]
+            if rekor_upload {
+                let first_kf = read_key_file(&keys[0])?;
+                let ed_bytes = veil_guard::crypto::unhex_array::<32>(&first_kf.ed25519_public)?;
+                let pem = veil_guard::rekor::ed25519_pubkey_to_pem(&ed_bytes);
+
+                match veil_guard::rekor::upload_manifest(&payload, &bundle, &pem, &rekor_url) {
+                    Ok(entry) => {
+                        println!(
+                            "rekor        uploaded log_index={} entry_id={}",
+                            entry.log_index, entry.entry_id
+                        );
+                        let mut manifest_val: serde_json::Value = serde_json::from_slice(&payload)?;
+                        manifest_val["source"]["rekor"] = serde_json::json!({
+                            "log_index": entry.log_index,
+                            "integrated_time": entry.integrated_time,
+                            "log_id": entry.log_id,
+                            "entry_id": entry.entry_id
+                        });
+                        let updated_payload =
+                            (serde_json::to_string_pretty(&manifest_val)? + "\n").into_bytes();
+                        fs::write(&manifest_path, &updated_payload)?;
+                    }
+                    Err(e) => {
+                        println!("rekor warning: upload failed: {e}");
+                    }
+                }
+            }
+            #[cfg(not(feature = "rekor"))]
+            if rekor_upload {
+                println!("rekor warning: --rekor-upload requested but veil-guard was built without feature `rekor`");
+            }
 
             println!("\nmanifest     {}", manifest_path.display());
             println!("version      {version}");
@@ -984,6 +1154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_on,
             out,
             json,
+            rekor_verify,
+            rekor_url,
+            relay_push,
+            relay_token,
         } => {
             use veil_guard::auditor::{audit, AuditOptions, Severity};
 
@@ -997,6 +1171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     label,
                     pinned_version,
                     graph_only,
+                    rekor_verify,
+                    rekor_url,
                     ..Default::default()
                 },
             )?;
@@ -1052,6 +1228,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            if let Some(r_url) = &relay_push {
+                #[cfg(feature = "relay-client")]
+                {
+                    let snap_val = serde_json::to_value(&snapshot)?;
+                    match veil_guard::relay::push_snapshot(r_url, &snap_val, relay_token.as_deref())
+                    {
+                        Ok(()) => println!("relay        pushed snapshot to {r_url}"),
+                        Err(e) => println!("relay warning: failed to push snapshot: {e}"),
+                    }
+                }
+                #[cfg(not(feature = "relay-client"))]
+                {
+                    println!("relay warning: --relay-push requested but veil-guard was built without feature `relay-client`");
+                }
+            }
+
             let threshold = match fail_on.as_str() {
                 "critical" => Severity::Critical,
                 "info" => Severity::Info,
@@ -1061,6 +1253,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+
+        #[cfg(feature = "relay-client")]
+        Commands::Relay { action } => match action {
+            RelayAction::Push {
+                snapshot,
+                relay_url,
+                token,
+            } => {
+                let snap_bytes = fs::read(&snapshot)?;
+                let snap_val: serde_json::Value = serde_json::from_slice(&snap_bytes)?;
+                veil_guard::relay::push_snapshot(&relay_url, &snap_val, token.as_deref())?;
+                println!("pushed snapshot {} to {relay_url}", snapshot.display());
+            }
+            RelayAction::Pull {
+                domain,
+                relay_url,
+                out_dir,
+                since,
+            } => {
+                let list = veil_guard::relay::pull_snapshots(&relay_url, &domain, since, &out_dir)?;
+                println!(
+                    "pulled {} snapshot(s) into {}",
+                    list.len(),
+                    out_dir.display()
+                );
+            }
+        },
 
         #[cfg(feature = "audit")]
         Commands::Diff { left, right, json } => {

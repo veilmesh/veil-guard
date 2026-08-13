@@ -34,10 +34,11 @@ flowchart TD
         P3A_2 --> P3A_3["Cross-Tier Threshold Reduction & Error Code 1"]
     end
 
-    subgraph Phase3B["🟣 Фаза 3B: Advanced Crypto & Rekor (В планах ⏳)"]
-        P3B_1["Split custody: KMS + Vault/PKCS#11"] --> P3B_2["Sigstore / Rekor Keyless"]
+    subgraph Phase3B["🟣 Фаза 3B: Advanced Crypto & Rekor (Завершена ✅)"]
+        P3B_1["Split custody: KMS + Vault/PKCS#11"] --> P3B_2["Sigstore / Rekor Transparency"]
         P3B_2 --> P3B_3["Third-Party Audit Relay"]
     end
+
 
     subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)"]
         P4_1["W3C & Guardian Integrity Violation Endpoint"] --> P4_2["veil-guard audit --daemon"]
@@ -291,10 +292,11 @@ export default defineConfig({
   - Сквозное вычитание отозванных ключей из порога во всех трех тирах: Tier 0 (`veil-guard verify` и `veil-guard audit`), Tier 1 (`veil-guard-sw.js`), Tier 2 Extension (`service-worker.js`).
 * [x] **Кросс-языковые векторы отзыва**: Генерация в `testdata/gen_vectors.mjs` и полная проверка в `cargo test` (83 теста) и `npm test` расширения (11 проверок).
 
-### 🟣 Фаза 3B: Advanced Crypto Infrastructure & Keyless Transparency (В планах ⏳)
-- Хранение ключей по алгоритму (SPEC §4.6): P-256 в AWS/GCP KMS, Ed25519 в HashiCorp Vault transit или PKCS#11 (YubiKey). Ни один раннер не должен уметь собрать порог в одиночку.
-- Интеграция Sigstore / Fulcio (OIDC) с публикацией в лог прозрачности Rekor.
-- Third-Party Audit Relay: сверка манифеста через независимые узлы (по аналогии с Meta Code Verify + Cloudflare).
+### 🟣 Фаза 3B: Advanced Crypto Infrastructure & Keyless Transparency (Завершена ✅)
+* [x] **Split Custody (SPEC §4.6)**: Хранение ключей по алгоритму — P-256 в AWS/GCP KMS (`src/kms.rs`), Ed25519 в HashiCorp Vault transit engine (`src/vault.rs`). При указании `--vault-addr` и `--p256-public-der` в `KeyFile` не сохраняется ни один приватный байт.
+* [x] **Sigstore / Rekor Transparency Log**: Загрузка хэша манифеста и подписи в Rekor (`src/rekor.rs` via `--rekor-upload`), фиксация metadata `source.rekor` (`log_index`, `integrated_time`, `log_id`, `entry_id`), и валидация в `veil-guard audit --rekor-verify`.
+* [x] **Third-Party Audit Relay**: Команды `veil-guard relay push` и `pull` (`src/relay.rs`), серверное эталонное приложение `veil-guard-relay` (`relay-server/src/main.rs`), автоматический пуш из `veil-guard audit --relay-push` и межрегиональная проверка расхождений через `veil-guard diff`.
+
 
 ### 🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)
 - Нативная поддержка приема отчетов **W3C `IntegrityViolationReport`** и Guardian-телеметрии.

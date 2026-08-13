@@ -15,5 +15,11 @@ pub mod html;
 pub mod kms;
 pub mod manifest;
 pub mod paths;
+#[cfg(feature = "rekor")]
+pub mod rekor;
+#[cfg(feature = "relay-client")]
+pub mod relay;
 pub mod runtime;
 pub mod scanner;
+#[cfg(feature = "vault")]
+pub mod vault;

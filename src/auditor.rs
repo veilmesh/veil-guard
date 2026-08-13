@@ -223,6 +223,8 @@ pub struct AuditOptions {
     pub graph_only: bool,
     pub timeout: Duration,
     pub max_body: u64,
+    pub rekor_verify: bool,
+    pub rekor_url: String,
 }
 
 impl Default for AuditOptions {
@@ -233,6 +235,8 @@ impl Default for AuditOptions {
             graph_only: false,
             timeout: Duration::from_secs(30),
             max_body: 64 * 1024 * 1024,
+            rekor_verify: false,
+            rekor_url: "https://rekor.sigstore.dev".to_string(),
         }
     }
 }
@@ -371,6 +375,76 @@ pub fn audit(
     };
     snapshot.manifest_version = Some(manifest.version);
     snapshot.assets_in_manifest = manifest.assets.len();
+
+    if opts.rekor_verify || manifest.source.get("rekor").is_some() {
+        #[cfg(feature = "rekor")]
+        {
+            if let Some(rekor_val) = manifest.source.get("rekor") {
+                if let (Some(log_idx), Some(int_time)) = (
+                    rekor_val["log_index"].as_u64(),
+                    rekor_val["integrated_time"].as_u64(),
+                ) {
+                    let entry = crate::rekor::RekorEntry {
+                        log_index: log_idx,
+                        integrated_time: int_time,
+                        log_id: rekor_val["log_id"].as_str().unwrap_or_default().to_string(),
+                        entry_id: rekor_val["entry_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    };
+                    match crate::rekor::verify_rekor_entry(
+                        &manifest_res.body,
+                        &entry,
+                        &opts.rekor_url,
+                    ) {
+                        Ok(true) => {
+                            findings.push(Finding::new(
+                                Severity::Info,
+                                "rekor-verified",
+                                base.clone(),
+                                format!("manifest hash verified in Rekor log_index={log_idx}"),
+                            ));
+                        }
+                        Ok(false) => {
+                            findings.push(Finding::new(
+                                Severity::Critical,
+                                "rekor-hash-mismatch",
+                                base.clone(),
+                                format!("manifest hash does not match Rekor record at log_index={log_idx}"),
+                            ));
+                        }
+                        Err(e) => {
+                            findings.push(Finding::new(
+                                Severity::Warning,
+                                "rekor-verification-failed",
+                                base.clone(),
+                                format!("failed to query Rekor log_index={log_idx}: {e}"),
+                            ));
+                        }
+                    }
+                }
+            } else if opts.rekor_verify {
+                findings.push(Finding::new(
+                    Severity::Warning,
+                    "rekor-not-found",
+                    base.clone(),
+                    "--rekor-verify requested but manifest source contains no Rekor entry",
+                ));
+            }
+        }
+        #[cfg(not(feature = "rekor"))]
+        {
+            if opts.rekor_verify {
+                findings.push(Finding::new(
+                    Severity::Warning,
+                    "rekor-disabled",
+                    base.clone(),
+                    "Rekor verification requested but veil-guard was built without feature `rekor`",
+                ));
+            }
+        }
+    }
 
     // ---- walk the served HTML graph -------------------------------------------
     // Limited by construction: this sees the static graph only. Route chunks that a
