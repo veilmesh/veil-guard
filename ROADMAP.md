@@ -40,13 +40,19 @@ flowchart TD
     end
 
 
-    subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)"]
+    subgraph Phase4["🔴 Фаза 4: Telemetry & Multi-Region Audit (Завершена ✅)"]
         P4_1["W3C & Guardian Integrity Violation Endpoint"] --> P4_2["veil-guard audit --daemon"]
-        P4_2 --> P4_3["SIEM / Datadog / PagerDuty"]
+        P4_2 --> P4_3["SIEM / Datadog / PagerDuty / Webhooks"]
     end
 
-    Phase1 --> Phase2 --> Phase3A --> Phase3B --> Phase4
+    subgraph Phase5["🔥 Фаза 5: Merkle Tree Streaming, Air-Gapped Mesh & K8s Operator (В процессе 🔄)"]
+        P5_1["Merkle Tree Chunked Streaming (SPEC §13)"] --> P5_2["Air-Gapped P2P Mesh Attestation"]
+        P5_2 --> P5_3["Kubernetes Operator & Ingress Sidecar Injection"]
+    end
+
+    Phase1 --> Phase2 --> Phase3A --> Phase3B --> Phase4 --> Phase5
 ```
+
 
 
 ---
@@ -298,8 +304,22 @@ export default defineConfig({
 * [x] **Third-Party Audit Relay**: Команды `veil-guard relay push` и `pull` (`src/relay.rs`), серверное эталонное приложение `veil-guard-relay` (`relay-server/src/main.rs`), автоматический пуш из `veil-guard audit --relay-push` и межрегиональная проверка расхождений через `veil-guard diff`.
 
 
-### 🔴 Фаза 4: Telemetry & Multi-Region Audit (В планах ⏳)
-- Нативная поддержка приема отчетов **W3C `IntegrityViolationReport`** и Guardian-телеметрии.
-- Запуск `veil-guard audit --daemon` для непрерывного многорегионального мониторинга CDN 24/7.
-- Интеграция с SIEM, Datadog, Sentry и PagerDuty (Slack / Webhooks).
+### 🔴 Фаза 4: Telemetry & Multi-Region Audit (Завершена ✅)
+* [x] **W3C & Guardian Telemetry Server (`src/bin/veil-guard-telemetry.rs`)**: Эндпоинт приема отчетов W3C `IntegrityViolationReport` (`application/reports+json` и `application/csp-report`) и Guardian-телеметрии от Tier 1/2 с поддержкой `Bytes` экстрактора, CORS, лимитов тела и опциональной авторизацией.
+* [x] **Continuous Daemon Audit Mode (`veil-guard audit --daemon`)**: Флаги `--daemon`, `--interval-secs <N>`, `--webhook-url <URL>`, `--webhook-format <FORMAT>` для непрерывного 24/7 аудита деплоев с `tokio::signal::ctrl_c()` и `MissedTickBehavior::Skip`.
+* [x] **SIEM & Alerting Webhooks (`src/alerting.rs`)**: Неблокирующая отправка алертов через `reqwest` в формате Generic JSON, Slack (BlockKit), PagerDuty Events v2 и Datadog с пер-таргетной стейт-машиной (`OK` $\rightarrow$ `FAIL` $\rightarrow$ `RESOLVE`).
+
+
+### 🔥 Фаза 5: Merkle Tree Streaming, Air-Gapped Mesh & K8s Operator (В процессе 🔄)
+* [ ] **Merkle Tree Chunked Streaming (SPEC §13 & Rust Core)**:
+  - Расширение структуры `AssetEntry` полем `merkle` (`chunk_size`, `leaf_hashes`, `root_hash`).
+  - Генерация деревьев Меркла в `src/scanner.rs` для крупных ассетов (>5 МБ Wasm / AI моделей / CAD бинарников).
+  - Потоковая верификация чанков в `veil-guard-wasm-loader.js` и `veil-guard-sw.js` с нулевой задержкой старта $O(1)$.
+* [ ] **Air-Gapped P2P Mesh Attestation (VeilMesh Relay Integration)**:
+  - Распространение и валидация подписанных манифестов через P2P рандеву (BLE / Wi-Fi Direct / Wi-Fi HaLow) при изолированной сети или сбоях централизованных CDN.
+* [ ] **Kubernetes Operator & Ingress Auto-injection (B2B Enterprise)**:
+  - Автоматическая подстановка CSP/SRI заголовков и регистрация сервисной аттестации на уровне Envoy/Traefik/Nginx Ingress без изменения исходного кода приложений.
+
+
+
 

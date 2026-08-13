@@ -7,7 +7,10 @@
 //! in `testdata/verify_vectors.mjs` also consumes.
 
 #[cfg(feature = "audit")]
+pub mod alerting;
+#[cfg(feature = "audit")]
 pub mod auditor;
+
 pub mod crypto;
 pub mod generators;
 pub mod html;

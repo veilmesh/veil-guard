@@ -252,6 +252,21 @@ enum Commands {
         /// Bearer token for relay push
         #[arg(long, env = "VEIL_RELAY_TOKEN")]
         relay_token: Option<String>,
+        /// Run in 24/7 continuous daemon monitoring mode
+        #[arg(long)]
+        daemon: bool,
+        /// Audit probing interval in seconds for daemon mode
+        #[arg(long, default_value_t = 300)]
+        interval_secs: u64,
+        /// Webhook URL to dispatch real-time security alerts
+        #[arg(long, env = "VEIL_WEBHOOK_URL")]
+        webhook_url: Option<String>,
+        /// Webhook alert payload format: generic, slack, pagerduty, datadog
+        #[arg(long, default_value = "generic")]
+        webhook_format: String,
+        /// Periodic heartbeat alert interval in hours for sustained failures
+        #[arg(long, default_value_t = 1)]
+        heartbeat_hours: u64,
     },
 
     /// Manage third-party audit relay: push or pull snapshots across vantage points
@@ -1201,16 +1216,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rekor_url,
             relay_push,
             relay_token,
+            daemon,
+            interval_secs,
+            webhook_url,
+            webhook_format,
+            heartbeat_hours,
         } => {
-            use veil_guard::auditor::{audit, AuditOptions, Severity};
+            use veil_guard::auditor::{audit, Severity};
 
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
 
+            let fail_severity = match fail_on.as_str() {
+                "critical" => Severity::Critical,
+                "info" => Severity::Info,
+                _ => Severity::Warning,
+            };
+
+            if daemon {
+                let wh_format: veil_guard::alerting::AlertFormat = webhook_format.parse()?;
+                let daemon_config = veil_guard::auditor::DaemonConfig {
+                    urls: vec![url.clone()],
+                    trust_root: root.clone(),
+                    interval_secs,
+                    fail_on_severity: fail_severity,
+                    label,
+                    pinned_version,
+                    graph_only,
+                    rekor_verify,
+                    rekor_url,
+                    relay_push,
+                    relay_token,
+                    webhook_url,
+                    webhook_format: wh_format,
+                    heartbeat_interval_secs: heartbeat_hours * 3600,
+                };
+
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(veil_guard::auditor::run_daemon(daemon_config))?;
+                return Ok(());
+            }
+
             let snapshot = audit(
                 &url,
                 &root,
-                &AuditOptions {
+                &veil_guard::auditor::AuditOptions {
                     label,
                     pinned_version,
                     graph_only,

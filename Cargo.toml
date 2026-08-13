@@ -33,11 +33,15 @@ ureq = { version = "3.3", optional = true }
 base64 = { version = "0.22", optional = true }
 
 # KMS dependencies
-tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "signal", "macros", "time"], optional = true }
+
 aws-config = { version = "1.1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-kms = { version = "1.1", optional = true }
 google-cloud-kms = { version = "0.5", optional = true }
 google-cloud-googleapis = { version = "0.15", optional = true }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "limit"], optional = true }
 
 [features]
 default = []
@@ -56,6 +60,7 @@ vault = ["dep:ureq", "dep:base64"]
 rekor = ["dep:ureq", "dep:base64"]
 relay-client = ["dep:ureq"]
 relay-server = ["dep:axum", "dep:tokio"]
+telemetry-server = ["dep:axum", "dep:tokio", "dep:tower-http", "dep:reqwest", "dep:base64"]
 
 [[bin]]
 name = "veil-guard"
@@ -66,9 +71,15 @@ name = "veil-guard-relay"
 path = "relay-server/src/main.rs"
 required-features = ["relay-server"]
 
+[[bin]]
+name = "veil-guard-telemetry"
+path = "src/bin/veil-guard-telemetry.rs"
+required-features = ["telemetry-server"]
+
 [dependencies.axum]
 version = "0.7"
 optional = true
+
 
 
 

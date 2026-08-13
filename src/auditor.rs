@@ -747,3 +747,163 @@ pub fn diff(left: &Snapshot, right: &Snapshot) -> Vec<Divergence> {
     }
     out
 }
+
+// ---------------------------------------------------------------- daemon & state machine
+#[derive(Debug, Clone)]
+pub struct TargetStatus {
+    pub is_failing: bool,
+    pub since: u64,
+    pub last_alert: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonConfig {
+    pub urls: Vec<String>,
+    pub trust_root: crate::crypto::TrustRoot,
+    pub interval_secs: u64,
+    pub fail_on_severity: Severity,
+    pub label: Option<String>,
+    pub pinned_version: u64,
+    pub graph_only: bool,
+    pub rekor_verify: bool,
+    pub rekor_url: String,
+    pub relay_push: Option<String>,
+    pub relay_token: Option<String>,
+    pub webhook_url: Option<String>,
+    pub webhook_format: crate::alerting::AlertFormat,
+    pub heartbeat_interval_secs: u64,
+}
+
+pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent("veil-guard (audit-daemon)")
+        .build()?;
+
+    let mut state: BTreeMap<String, TargetStatus> = BTreeMap::new();
+    let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    println!(
+        "veil-guard audit daemon started monitoring {} target(s) every {}s",
+        config.urls.len(),
+        config.interval_secs
+    );
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                for url in &config.urls {
+                    let opts = AuditOptions {
+                        label: config.label.clone(),
+                        pinned_version: config.pinned_version,
+                        graph_only: config.graph_only,
+                        rekor_verify: config.rekor_verify,
+                        rekor_url: config.rekor_url.clone(),
+                        ..Default::default()
+                    };
+
+                    let snapshot_res = std::panic::catch_unwind(|| {
+                        audit(
+                            url,
+                            &config.trust_root,
+                            &opts,
+                        )
+                    });
+
+
+                    let snapshot = match snapshot_res {
+                        Ok(Ok(snap)) => snap,
+                        Ok(Err(e)) => {
+                            println!("daemon probe error for {url}: {e}");
+                            continue;
+                        }
+                        Err(_) => {
+                            println!("daemon probe panicked for {url}");
+                            continue;
+                        }
+                    };
+
+                    let has_failures = snapshot.findings.iter().any(|f| f.severity <= config.fail_on_severity);
+
+                    if let Some(relay_url) = &config.relay_push {
+                        let snap_val = serde_json::to_value(&snapshot).unwrap_or_default();
+                        let _ = crate::relay::push_snapshot(relay_url, &snap_val, config.relay_token.as_deref());
+                    }
+
+                    let status = state.entry(url.clone()).or_insert(TargetStatus {
+                        is_failing: false,
+                        since: 0,
+                        last_alert: 0,
+                    });
+
+                    if has_failures {
+                        if !status.is_failing {
+                            status.is_failing = true;
+                            status.since = now;
+                            status.last_alert = now;
+
+                            if let Some(wh) = &config.webhook_url {
+                                let alert = crate::alerting::AlertPayload {
+                                    event_type: "TRIGGER".into(),
+                                    target_url: url.clone(),
+                                    label: config.label.clone(),
+                                    timestamp: now,
+                                    severity: format!("{:?}", config.fail_on_severity),
+                                    summary: format!("Audit findings exceeded severity threshold for {url}"),
+                                    findings_count: snapshot.findings.len(),
+                                    details: serde_json::to_value(&snapshot).unwrap_or_default(),
+                                };
+                                let _ = crate::alerting::send_alert(&http_client, wh, config.webhook_format, &alert, config.relay_token.as_deref()).await;
+                            }
+                        } else if config.heartbeat_interval_secs > 0 && now.saturating_sub(status.last_alert) >= config.heartbeat_interval_secs {
+                            status.last_alert = now;
+                            if let Some(wh) = &config.webhook_url {
+                                let alert = crate::alerting::AlertPayload {
+                                    event_type: "TRIGGER".into(),
+                                    target_url: url.clone(),
+                                    label: config.label.clone(),
+                                    timestamp: now,
+                                    severity: format!("{:?}", config.fail_on_severity),
+                                    summary: format!("Sustained audit failure heartbeat for {url}"),
+                                    findings_count: snapshot.findings.len(),
+                                    details: serde_json::to_value(&snapshot).unwrap_or_default(),
+                                };
+                                let _ = crate::alerting::send_alert(&http_client, wh, config.webhook_format, &alert, config.relay_token.as_deref()).await;
+                            }
+                        }
+                    } else if status.is_failing {
+                        status.is_failing = false;
+                        status.last_alert = now;
+
+                        if let Some(wh) = &config.webhook_url {
+                            let alert = crate::alerting::AlertPayload {
+                                event_type: "RESOLVE".into(),
+                                target_url: url.clone(),
+                                label: config.label.clone(),
+                                timestamp: now,
+                                severity: "info".into(),
+                                summary: format!("Audit status recovered for {url}"),
+                                findings_count: 0,
+                                details: serde_json::json!({ "status": "resolved" }),
+                            };
+                            let _ = crate::alerting::send_alert(&http_client, wh, config.webhook_format, &alert, config.relay_token.as_deref()).await;
+                        }
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Shutting down veil-guard audit daemon gracefully...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
