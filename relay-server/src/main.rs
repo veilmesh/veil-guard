@@ -72,7 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!("Loaded {} persisted snapshot(s) from {}", loaded.len(), dir.display());
+        println!(
+            "Loaded {} persisted snapshot(s) from {}",
+            loaded.len(),
+            dir.display()
+        );
         *state.snapshots.lock().unwrap() = loaded;
     }
 
@@ -126,7 +130,10 @@ async fn push_snapshot(
         let safe_label = label.replace(['/', ':', '?'], "_");
         let fname = format!("{safe_label}_{idx}.json");
         let file_path = dir.join(fname);
-        let _ = fs::write(file_path, serde_json::to_string_pretty(&payload).unwrap_or_default() + "\n");
+        let _ = fs::write(
+            file_path,
+            serde_json::to_string_pretty(&payload).unwrap_or_default() + "\n",
+        );
     }
 
     (

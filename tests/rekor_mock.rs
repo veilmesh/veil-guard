@@ -123,8 +123,7 @@ fn test_rekor_mock_flow() {
     });
 
     let manifest_obj = serde_json::json!({ "test": "manifest" });
-    let manifest_bytes =
-        (serde_json::to_string_pretty(&manifest_obj).unwrap() + "\n").into_bytes();
+    let manifest_bytes = (serde_json::to_string_pretty(&manifest_obj).unwrap() + "\n").into_bytes();
     let sig_bytes = b"mock_vgsig1_bundle";
 
     let entry = upload_manifest(&manifest_bytes, sig_bytes, &pem, &rekor_url)
@@ -154,12 +153,13 @@ fn test_rekor_mock_flow() {
     let manifest_with_rekor_bytes =
         (serde_json::to_string_pretty(&manifest_with_rekor).unwrap() + "\n").into_bytes();
 
-    let is_valid_with_rekor =
-        verify_rekor_entry(&manifest_with_rekor_bytes, &entry, &rekor_url)
-            .expect("verify rekor entry with source.rekor");
+    let is_valid_with_rekor = verify_rekor_entry(&manifest_with_rekor_bytes, &entry, &rekor_url)
+        .expect("verify rekor entry with source.rekor");
 
-    assert!(is_valid_with_rekor, "B1 fix: verify_rekor_entry must strip source.rekor before computing hash!");
+    assert!(
+        is_valid_with_rekor,
+        "B1 fix: verify_rekor_entry must strip source.rekor before computing hash!"
+    );
 
     server_handle.join().unwrap();
 }
-

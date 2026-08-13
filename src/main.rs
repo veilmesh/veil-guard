@@ -82,7 +82,6 @@ enum Commands {
         #[arg(long, requires = "vault_addr")]
         ed25519_public_hex: Option<String>,
 
-
         /// Token for HashiCorp Vault authentication
         #[arg(long, env = "VAULT_TOKEN")]
         vault_token: Option<String>,
@@ -366,7 +365,6 @@ pub enum RelayAction {
         #[arg(long, env = "VEIL_RELAY_TOKEN")]
         token: Option<String>,
     },
-
 }
 
 /// On-disk signer identity.
@@ -609,7 +607,6 @@ fn sign_with_vault(
         Err("Vault support is disabled. Rebuild with --features vault to enable.".into())
     }
 }
-
 
 fn read_key_file(path: &Path) -> Result<KeyFile, Box<dyn std::error::Error>> {
     let kf: KeyFile = serde_json::from_slice(&fs::read(path)?)?;
@@ -1010,7 +1007,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             #[cfg(not(feature = "rekor"))]
-
             if rekor_upload {
                 println!("rekor warning: --rekor-upload requested but veil-guard was built without feature `rekor`");
             }

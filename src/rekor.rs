@@ -122,33 +122,34 @@ pub fn verify_rekor_entry(
     rekor_entry: &RekorEntry,
     rekor_url: &str,
 ) -> Result<bool, Box<dyn Error>> {
-    let payload_bytes =
-        if let Ok(mut manifest) = serde_json::from_slice::<crate::manifest::Manifest>(manifest_bytes) {
-            if let Some(source) = manifest.source.as_object_mut() {
-                if source.remove("rekor").is_some() {
-                    (serde_json::to_string_pretty(&manifest).unwrap_or_default() + "\n").into_bytes()
-                } else {
-                    manifest_bytes.to_vec()
-                }
-            } else {
-                manifest_bytes.to_vec()
-            }
-        } else if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(manifest_bytes) {
-            if let Some(source) = val.get_mut("source").and_then(|s| s.as_object_mut()) {
-                if source.remove("rekor").is_some() {
-                    if source.is_empty() {
-                        val.as_object_mut().unwrap().remove("source");
-                    }
-                    (serde_json::to_string_pretty(&val).unwrap_or_default() + "\n").into_bytes()
-                } else {
-                    manifest_bytes.to_vec()
-                }
+    let payload_bytes = if let Ok(mut manifest) =
+        serde_json::from_slice::<crate::manifest::Manifest>(manifest_bytes)
+    {
+        if let Some(source) = manifest.source.as_object_mut() {
+            if source.remove("rekor").is_some() {
+                (serde_json::to_string_pretty(&manifest).unwrap_or_default() + "\n").into_bytes()
             } else {
                 manifest_bytes.to_vec()
             }
         } else {
             manifest_bytes.to_vec()
-        };
+        }
+    } else if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(manifest_bytes) {
+        if let Some(source) = val.get_mut("source").and_then(|s| s.as_object_mut()) {
+            if source.remove("rekor").is_some() {
+                if source.is_empty() {
+                    val.as_object_mut().unwrap().remove("source");
+                }
+                (serde_json::to_string_pretty(&val).unwrap_or_default() + "\n").into_bytes()
+            } else {
+                manifest_bytes.to_vec()
+            }
+        } else {
+            manifest_bytes.to_vec()
+        }
+    } else {
+        manifest_bytes.to_vec()
+    };
 
     let manifest_sha256 = hex::encode(Sha256::digest(&payload_bytes));
 

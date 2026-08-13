@@ -103,9 +103,14 @@ fn test_relay_push_pull_diff_roundtrip() {
     // 2. Pull
     let tmp_dir = std::env::temp_dir().join("veil_guard_relay_test");
     let _ = fs::remove_dir_all(&tmp_dir);
-    let list =
-        pull_snapshots(&relay_url, "app.example.com", None, &tmp_dir, Some("secret_token")).expect("pull snapshots");
-
+    let list = pull_snapshots(
+        &relay_url,
+        "app.example.com",
+        None,
+        &tmp_dir,
+        Some("secret_token"),
+    )
+    .expect("pull snapshots");
 
     assert_eq!(list.len(), 1);
     let pulled_snap: Snapshot = serde_json::from_value(list[0].clone()).expect("parse snapshot");

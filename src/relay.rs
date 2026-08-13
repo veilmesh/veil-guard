@@ -87,4 +87,3 @@ pub fn pull_snapshots(
 
     Ok(json_array)
 }
-
