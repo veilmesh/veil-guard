@@ -32,7 +32,7 @@ pub fn push_snapshot(
         .map_err(|e| format!("Relay push to {url} failed: {e}"))?;
 
     let status = resp.status().as_u16();
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(format!("Relay push failed with HTTP status {status}").into());
     }
     Ok(())
@@ -43,6 +43,7 @@ pub fn pull_snapshots(
     domain: &str,
     since: Option<u64>,
     out_dir: &Path,
+    token: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     let mut url = format!(
         "{}/snapshots?domain={}",
@@ -59,11 +60,20 @@ pub fn pull_snapshots(
         .build();
     let agent: Agent = config.into();
 
-    let mut resp = agent
-        .get(&url)
-        .header("Accept", "application/json")
+    let mut req = agent.get(&url).header("Accept", "application/json");
+    if let Some(t) = token {
+        req = req.header("Authorization", &format!("Bearer {t}"));
+    }
+
+    let mut resp = req
         .call()
         .map_err(|e| format!("Relay pull from {url} failed: {e}"))?;
+
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("Relay pull failed with HTTP status {status}").into());
+    }
+
     let resp_str = resp.body_mut().read_to_string()?;
     let json_array: Vec<serde_json::Value> = serde_json::from_str(&resp_str)?;
 
@@ -77,3 +87,4 @@ pub fn pull_snapshots(
 
     Ok(json_array)
 }
+

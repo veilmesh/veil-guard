@@ -42,11 +42,8 @@ fn test_vault_transit_mock() {
                     // Extract Content-Length
                     for line in req_str[..pos].lines() {
                         let l = line.to_lowercase();
-                        if l.starts_with("content-length:") {
-                            content_len = l["content-length:".len()..]
-                                .trim()
-                                .parse::<usize>()
-                                .unwrap_or(0);
+                        if let Some(stripped) = l.strip_prefix("content-length:") {
+                            content_len = stripped.trim().parse::<usize>().unwrap_or(0);
                         }
                     }
                 }

@@ -42,11 +42,8 @@ fn test_relay_push_pull_diff_roundtrip() {
                         body_start = Some(pos + 4);
                         for line in req_str[..pos].lines() {
                             let l = line.to_lowercase();
-                            if l.starts_with("content-length:") {
-                                content_len = l["content-length:".len()..]
-                                    .trim()
-                                    .parse::<usize>()
-                                    .unwrap_or(0);
+                            if let Some(stripped) = l.strip_prefix("content-length:") {
+                                content_len = stripped.trim().parse::<usize>().unwrap_or(0);
                             }
                         }
                     }
@@ -58,8 +55,11 @@ fn test_relay_push_pull_diff_roundtrip() {
                 }
             }
 
-            let req_str = String::from_utf8_lossy(&request_bytes);
-            if req_str.starts_with("POST") {
+            let req_str = String::from_utf8_lossy(&request_bytes).to_lowercase();
+            assert!(req_str.contains("authorization: bearer secret_token"));
+
+            let raw_req = String::from_utf8_lossy(&request_bytes);
+            if raw_req.starts_with("POST") {
                 let start = body_start.expect("found body start");
                 let snap_val: serde_json::Value =
                     serde_json::from_slice(&request_bytes[start..start + content_len]).unwrap();
@@ -67,7 +67,7 @@ fn test_relay_push_pull_diff_roundtrip() {
 
                 let response = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
                 stream.write_all(response.as_bytes()).unwrap();
-            } else if req_str.starts_with("GET") {
+            } else if raw_req.starts_with("GET") {
                 let list = store_clone.lock().unwrap().clone();
                 let resp_json = serde_json::to_string(&list).unwrap();
                 let response = format!(
@@ -104,7 +104,8 @@ fn test_relay_push_pull_diff_roundtrip() {
     let tmp_dir = std::env::temp_dir().join("veil_guard_relay_test");
     let _ = fs::remove_dir_all(&tmp_dir);
     let list =
-        pull_snapshots(&relay_url, "app.example.com", None, &tmp_dir).expect("pull snapshots");
+        pull_snapshots(&relay_url, "app.example.com", None, &tmp_dir, Some("secret_token")).expect("pull snapshots");
+
 
     assert_eq!(list.len(), 1);
     let pulled_snap: Snapshot = serde_json::from_value(list[0].clone()).expect("parse snapshot");

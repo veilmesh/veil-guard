@@ -81,6 +81,11 @@ enum Commands {
         /// Hex-encoded 32-byte Ed25519 public key (required if --vault-addr is used)
         #[arg(long, requires = "vault_addr")]
         ed25519_public_hex: Option<String>,
+
+
+        /// Token for HashiCorp Vault authentication
+        #[arg(long, env = "VAULT_TOKEN")]
+        vault_token: Option<String>,
     },
 
     /// Assemble a trust root from signer key files
@@ -167,6 +172,10 @@ enum Commands {
         /// KMS provider to use
         #[arg(long, value_parser = ["aws", "gcp"])]
         kms_provider: Option<String>,
+
+        /// Token for HashiCorp Vault authentication
+        #[arg(long, env = "VAULT_TOKEN")]
+        vault_token: Option<String>,
 
         /// Upload manifest hash and signature to Sigstore Rekor transparency log
         #[arg(long)]
@@ -279,6 +288,15 @@ enum Commands {
         /// Override the statement version (defaults to the current Unix time)
         #[arg(long)]
         version: Option<u64>,
+        /// AWS KMS Key ARN or GCP Key Resource ID for P-256 signing
+        #[arg(long)]
+        kms_key_id: Option<String>,
+        /// KMS provider to use
+        #[arg(long, value_parser = ["aws", "gcp"])]
+        kms_provider: Option<String>,
+        /// Token for HashiCorp Vault authentication
+        #[arg(long, env = "VAULT_TOKEN")]
+        vault_token: Option<String>,
     },
 
     /// Produce a revocation statement marking specific keys in a trust root as revoked
@@ -303,6 +321,15 @@ enum Commands {
         /// Optional reason for revocation
         #[arg(long)]
         reason: Option<String>,
+        /// AWS KMS Key ARN or GCP Key Resource ID for P-256 signing
+        #[arg(long)]
+        kms_key_id: Option<String>,
+        /// KMS provider to use
+        #[arg(long, value_parser = ["aws", "gcp"])]
+        kms_provider: Option<String>,
+        /// Token for HashiCorp Vault authentication
+        #[arg(long, env = "VAULT_TOKEN")]
+        vault_token: Option<String>,
     },
 }
 
@@ -335,7 +362,11 @@ pub enum RelayAction {
         /// Filter snapshots created after this Unix timestamp
         #[arg(long)]
         since: Option<u64>,
+        /// Bearer authentication token
+        #[arg(long, env = "VEIL_RELAY_TOKEN")]
+        token: Option<String>,
     },
+
 }
 
 /// On-disk signer identity.
@@ -393,6 +424,7 @@ impl KeyFile {
         }
     }
 
+    #[allow(dead_code)]
     fn signer(&self) -> Result<SignerKeys, Box<dyn std::error::Error>> {
         let seed = self
             .ed25519_seed
@@ -414,6 +446,7 @@ impl KeyFile {
         payload: &[u8],
         kms_key_id: Option<&str>,
         kms_provider: Option<&str>,
+        vault_token: Option<&str>,
     ) -> Result<Vec<SigEntry>, Box<dyn std::error::Error>> {
         use ed25519_dalek::Signer as _;
 
@@ -450,7 +483,7 @@ impl KeyFile {
                     self.key_id
                 )
             })?;
-            let sig_bytes = sign_with_vault(&msg, v_addr, v_key)?;
+            let sig_bytes = sign_with_vault(&msg, v_addr, v_key, vault_token)?;
             entries.push(SigEntry {
                 key_id: key_id_bytes,
                 alg_id: SigAlg::Ed25519.alg_id(),
@@ -565,16 +598,18 @@ fn sign_with_vault(
     _msg: &[u8],
     _vault_addr: &str,
     _vault_key_name: &str,
+    _vault_token: Option<&str>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     #[cfg(feature = "vault")]
     {
-        veil_guard::vault::sign_vault_transit(_msg, _vault_addr, _vault_key_name, None)
+        veil_guard::vault::sign_vault_transit(_msg, _vault_addr, _vault_key_name, _vault_token)
     }
     #[cfg(not(feature = "vault"))]
     {
         Err("Vault support is disabled. Rebuild with --features vault to enable.".into())
     }
 }
+
 
 fn read_key_file(path: &Path) -> Result<KeyFile, Box<dyn std::error::Error>> {
     let kf: KeyFile = serde_json::from_slice(&fs::read(path)?)?;
@@ -613,7 +648,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vault_addr,
             vault_key_name,
             ed25519_public_hex,
+            vault_token,
         } => {
+            let _ = &vault_token;
             fs::create_dir_all(&out_dir)?;
 
             let signer = SignerKeys::generate();
@@ -758,6 +795,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             provenance_json,
             kms_key_id,
             kms_provider,
+            vault_token,
             rekor_upload,
             rekor_url,
         } => {
@@ -914,6 +952,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &payload,
                     kms_key_id.as_deref(),
                     kms_provider.as_deref(),
+                    vault_token.as_deref(),
                 )?);
             }
             let bundle = build_bundle(&entries);
@@ -941,7 +980,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ed_bytes = veil_guard::crypto::unhex_array::<32>(&first_kf.ed25519_public)?;
                 let pem = veil_guard::rekor::ed25519_pubkey_to_pem(&ed_bytes);
 
-                match veil_guard::rekor::upload_manifest(&payload, &bundle, &pem, &rekor_url) {
+                let first_key_id = veil_guard::crypto::unhex_array::<8>(&first_kf.key_id)?;
+                let ed_sig_bytes = entries
+                    .iter()
+                    .find(|e| e.key_id == first_key_id && e.alg_id == SigAlg::Ed25519.alg_id())
+                    .map(|e| &e.sig[..])
+                    .ok_or("No Ed25519 signature entry found for primary signer in rekor upload")?;
+
+                match veil_guard::rekor::upload_manifest(&payload, ed_sig_bytes, &pem, &rekor_url) {
                     Ok(entry) => {
                         println!(
                             "rekor        uploaded log_index={} entry_id={}",
@@ -964,6 +1010,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             #[cfg(not(feature = "rekor"))]
+
             if rekor_upload {
                 println!("rekor warning: --rekor-upload requested but veil-guard was built without feature `rekor`");
             }
@@ -1228,13 +1275,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if let Some(r_url) = &relay_push {
+            let _ = &relay_token;
+            if let Some(_r_url) = &relay_push {
                 #[cfg(feature = "relay-client")]
                 {
                     let snap_val = serde_json::to_value(&snapshot)?;
-                    match veil_guard::relay::push_snapshot(r_url, &snap_val, relay_token.as_deref())
-                    {
-                        Ok(()) => println!("relay        pushed snapshot to {r_url}"),
+                    match veil_guard::relay::push_snapshot(
+                        _r_url,
+                        &snap_val,
+                        relay_token.as_deref(),
+                    ) {
+                        Ok(()) => println!("relay        pushed snapshot to {_r_url}"),
                         Err(e) => println!("relay warning: failed to push snapshot: {e}"),
                     }
                 }
@@ -1271,8 +1322,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 relay_url,
                 out_dir,
                 since,
+                token,
             } => {
-                let list = veil_guard::relay::pull_snapshots(&relay_url, &domain, since, &out_dir)?;
+                let list = veil_guard::relay::pull_snapshots(
+                    &relay_url,
+                    &domain,
+                    since,
+                    &out_dir,
+                    token.as_deref(),
+                )?;
+
                 println!(
                     "pulled {} snapshot(s) into {}",
                     list.len(),
@@ -1323,6 +1382,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keys,
             out,
             version,
+            kms_key_id,
+            kms_provider,
+            vault_token,
         } => {
             let old: TrustRoot = serde_json::from_slice(&fs::read(&from)?)?;
             let new: TrustRoot = serde_json::from_slice(&fs::read(&to)?)?;
@@ -1339,11 +1401,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut entries = Vec::new();
             for path in &keys {
-                entries.extend(
-                    read_key_file(path)?
-                        .signer()?
-                        .sign(PREFIX_ROTATION, &payload),
-                );
+                entries.extend(read_key_file(path)?.sign(
+                    PREFIX_ROTATION,
+                    &payload,
+                    kms_key_id.as_deref(),
+                    kms_provider.as_deref(),
+                    vault_token.as_deref(),
+                )?);
             }
             let bundle = build_bundle(&entries);
 
@@ -1381,6 +1445,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             version,
             not_after_days,
             reason,
+            kms_key_id,
+            kms_provider,
+            vault_token,
         } => {
             let root: TrustRoot = serde_json::from_slice(&fs::read(&trust_root)?)?;
             root.validate()?;
@@ -1414,12 +1481,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut entries = Vec::new();
             for path in &keys {
-                entries.extend(
-                    read_key_file(path)?
-                        .signer()?
-                        .sign(PREFIX_REVOCATION, &payload),
-                );
+                entries.extend(read_key_file(path)?.sign(
+                    PREFIX_REVOCATION,
+                    &payload,
+                    kms_key_id.as_deref(),
+                    kms_provider.as_deref(),
+                    vault_token.as_deref(),
+                )?);
             }
+
             let bundle = build_bundle(&entries);
 
             if verify_revocation(&payload, &bundle, &root, 0, now, SUPPORTED_ALGS)

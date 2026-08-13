@@ -41,11 +41,8 @@ fn test_rekor_mock_flow() {
                         body_start = Some(pos + 4);
                         for line in req_str[..pos].lines() {
                             let l = line.to_lowercase();
-                            if l.starts_with("content-length:") {
-                                content_len = l["content-length:".len()..]
-                                    .trim()
-                                    .parse::<usize>()
-                                    .unwrap_or(0);
+                            if let Some(stripped) = l.strip_prefix("content-length:") {
+                                content_len = stripped.trim().parse::<usize>().unwrap_or(0);
                             }
                         }
                     }
@@ -80,16 +77,18 @@ fn test_rekor_mock_flow() {
             stream.flush().unwrap();
         }
 
-        // Handle 2: GET /api/v1/log/entries?logIndex=42
-        {
+        // Handle 2 & 3: GET /api/v1/log/entries?logIndex=42 (for basic verify and B1 verify)
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().expect("accept connection 2");
             let mut buffer = [0u8; 2048];
             let n = stream.read(&mut buffer).expect("read request");
             let req_str = String::from_utf8_lossy(&buffer[..n]);
             assert!(req_str.contains("logIndex=42"));
 
-            let manifest_bytes = b"{\"test\":\"manifest\"}";
-            let manifest_sha256 = hex::encode(sha2::Sha256::digest(manifest_bytes));
+            let manifest_obj = serde_json::json!({ "test": "manifest" });
+            let manifest_bytes =
+                (serde_json::to_string_pretty(&manifest_obj).unwrap() + "\n").into_bytes();
+            let manifest_sha256 = hex::encode(sha2::Sha256::digest(&manifest_bytes));
 
             let body_obj = serde_json::json!({
                 "kind": "hashedrekord",
@@ -123,19 +122,44 @@ fn test_rekor_mock_flow() {
         }
     });
 
-    let manifest_bytes = b"{\"test\":\"manifest\"}";
+    let manifest_obj = serde_json::json!({ "test": "manifest" });
+    let manifest_bytes =
+        (serde_json::to_string_pretty(&manifest_obj).unwrap() + "\n").into_bytes();
     let sig_bytes = b"mock_vgsig1_bundle";
 
-    let entry = upload_manifest(manifest_bytes, sig_bytes, &pem, &rekor_url)
+    let entry = upload_manifest(&manifest_bytes, sig_bytes, &pem, &rekor_url)
         .expect("upload manifest to rekor mock");
 
     assert_eq!(entry.log_index, 42);
     assert_eq!(entry.integrated_time, 1754726400);
 
     let is_valid =
-        verify_rekor_entry(manifest_bytes, &entry, &rekor_url).expect("verify rekor entry");
+        verify_rekor_entry(&manifest_bytes, &entry, &rekor_url).expect("verify rekor entry");
 
     assert!(is_valid);
 
+    // Verify B1 fix: verify_rekor_entry when manifest_bytes has source.rekor attached
+    let manifest_with_rekor = serde_json::json!({
+        "test": "manifest",
+
+        "source": {
+            "rekor": {
+                "log_index": 42,
+                "integrated_time": 1754726400u64,
+                "log_id": "test_log_id_hash",
+                "entry_id": "entry_42_key"
+            }
+        }
+    });
+    let manifest_with_rekor_bytes =
+        (serde_json::to_string_pretty(&manifest_with_rekor).unwrap() + "\n").into_bytes();
+
+    let is_valid_with_rekor =
+        verify_rekor_entry(&manifest_with_rekor_bytes, &entry, &rekor_url)
+            .expect("verify rekor entry with source.rekor");
+
+    assert!(is_valid_with_rekor, "B1 fix: verify_rekor_entry must strip source.rekor before computing hash!");
+
     server_handle.join().unwrap();
 }
+
