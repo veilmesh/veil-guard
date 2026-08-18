@@ -17,7 +17,7 @@ carefully. **Blocked** means the attack does not reach the page. **Detected** me
 reaches the page and something tells you afterwards — an icon, a finding, an alert.
 The two are not interchangeable, and a threat model that blurs them is worse than none.
 
-| Attack Scenario | Level | Tier 0 (CLI / SRI / CSP / audit) | Tier 1 (Service Worker) | Tier 2 (extension) |
+| Attack Scenario | Level | Tier 0 (CLI / SRI / CSP / audit) | Tier 1 (Service Worker) | Tier 2 (extension)* |
 | :--- | :---: | :---: | :---: | :---: |
 | **CDN Subresource Compromise** (HTML-linked CSS/JS) | High | ✅ Blocked via SRI | ✅ Blocked | ✅ Blocked (via Tier 1) |
 | **Dynamic Lazy Route / Wasm Chunk Tampering** (`import()`) | High | ❌ No SRI to apply | ✅ Blocked via SW | ✅ Blocked (via Tier 1) |
@@ -30,6 +30,8 @@ The two are not interchangeable, and a threat model that blurs them is worse tha
 | **Signer Private Key Theft** | Critical | ⚠️ One key is not enough: 2-of-3 threshold (§4.4) | ⚠️ Same | ✅ Revocable out-of-band (§9.2) |
 | **Threshold of Signer Keys Stolen** | Critical | ❌ Indistinguishable from a legitimate build | ❌ Same | ❌ Same — rotate, do not revoke |
 | **Targeted Malicious Delivery** (bad bundle to some visitors) | Critical | ⚠️ Detected via multi-vantage `audit` + `diff` | ❌ | ⚠️ Detected |
+
+\* **Tier 2 (Browser Extension)** is currently not yet in Web Stores (pending Chrome Web Store & Firefox AMO review) and is built from source. Source code and instructions for loading unpacked are at [`veilmesh/veil-guard-ext`](https://github.com/veilmesh/veil-guard-ext).
 
 Two entries need their footnotes read.
 

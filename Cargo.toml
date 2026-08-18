@@ -5,6 +5,12 @@ edition = "2021"
 authors = ["VeilMesh Team <dev@veilmesh.com>"]
 description = "Web asset integrity and attestation suite: threshold-signed manifests, SRI/CSP generation, and out-of-band audit"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/veilmesh/veil-guard"
+homepage = "https://veilmesh.com"
+documentation = "https://github.com/veilmesh/veil-guard#readme"
+keywords = ["security", "zero-trust", "sri", "attestation", "wasm"]
+categories = ["command-line-utilities", "web-programming", "cryptography"]
 
 [dependencies]
 # Signing and verification — see SPEC.md §2
