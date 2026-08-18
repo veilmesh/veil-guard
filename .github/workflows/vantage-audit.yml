@@ -1,0 +1,91 @@
+# Audit the live veilmesh.com deployment from a GitHub-hosted runner.
+#
+# The point is the vantage point, not the audit: `veil-guard audit` run from one place
+# shows the bundle matches what was signed, and nothing more. Divergence between places
+# is the only signal that reveals a bundle served to some visitors and not others
+# (README threat matrix, "Targeted Malicious Delivery"). GitHub's runners sit in US
+# Azure regions, so this pairs with a snapshot taken from Europe.
+#
+# Drop this at .github/workflows/vantage-audit.yml, and commit the trust root next to
+# it as veil-guard-trust-root.json — see the "Trust root" step for why it has to come
+# from the repository and never from the site.
+
+name: Vantage audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Deployment to audit'
+        required: false
+        default: 'https://veilmesh.com'
+      label:
+        description: 'Vantage-point label recorded in the snapshot'
+        required: false
+        default: 'github-us'
+  # Uncomment to keep a standing record. Divergence is only visible over time if
+  # somebody is actually looking.
+  # schedule:
+  #   - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VG_VERSION: '0.2.0'
+      URL: ${{ inputs.url || 'https://veilmesh.com' }}
+      LABEL: ${{ inputs.label || 'github-us' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The trust root has to reach this runner out of band. Fetching it from the site
+      # being audited would close the loop: a host able to serve a bad bundle can serve
+      # the trust root that blesses it, and the audit would pass on both. Committed in
+      # this repository, it travelled by a path the audited host does not control.
+      - name: Trust root
+        run: |
+          set -eux
+          test -f veil-guard-trust-root.json
+          sha256sum veil-guard-trust-root.json
+
+      # Check the archive against the release's own SHA256SUMS before unpacking it —
+      # the same rule veil-guard-action follows. A tool whose job is refusing bytes that
+      # do not match a published hash should not install itself on trust.
+      - name: Install veil-guard
+        run: |
+          set -eux
+          NAME="veil-guard-${VG_VERSION}-x86_64-unknown-linux-musl"
+          BASE="https://github.com/veilmesh/veil-guard/releases/download/v${VG_VERSION}"
+          curl -fsSL -o "$NAME.tar.gz" "$BASE/$NAME.tar.gz"
+          curl -fsSL -o SHA256SUMS "$BASE/SHA256SUMS"
+          grep " $NAME.tar.gz\$" SHA256SUMS | sha256sum -c -
+          tar xzf "$NAME.tar.gz"
+          echo "$PWD/$NAME" >> "$GITHUB_PATH"
+
+      - name: Where this runner is
+        run: |
+          curl -sI "$URL" | tr -d '\r' | grep -i '^cf-ray' || true
+
+      - name: Audit
+        run: |
+          set -eux
+          veil-guard audit \
+            --url "$URL" \
+            --trust-root veil-guard-trust-root.json \
+            --label "$LABEL" \
+            --out "snap-${LABEL}.json"
+
+      # Printed as well as uploaded: the artifact is the thing to feed `veil-guard diff`,
+      # the log is what makes the run readable without downloading anything.
+      - name: Snapshot
+        run: cat "snap-${LABEL}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-${{ env.LABEL }}
+          path: snap-${{ env.LABEL }}.json
+          if-no-files-found: error

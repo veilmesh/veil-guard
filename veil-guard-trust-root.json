@@ -1,0 +1,27 @@
+{
+  "threshold": 2,
+  "sigalgs": [
+    "ed25519",
+    "p256"
+  ],
+  "keys": [
+    {
+      "key_id": "735e75964361adf0",
+      "role": "recovery",
+      "ed25519": "6128d6dea46b034bc6c5cbcc8ce8f3bba8aa995b23e3b82a852ca05e7fc3450f",
+      "p256": "04387185f90059294fa772fed809859a6a3b698d2988c86887d95a3afa7b4358bdcccb239375f2f07a29e73bf2c294e357e58c189b93745ef92b32bf56d9c76eb2"
+    },
+    {
+      "key_id": "7fa0341201e07afa",
+      "role": "build",
+      "ed25519": "b6e264e92a0e64b26f4dba1c8d3c145be05783f5b03f164d6be755ebd57a4816",
+      "p256": "04607111936ad8e1178303f436796c3819ce3decbd9e20405c7a630d00c0202bbce2d2587eb17a9e81a9f8ef59393ba1ab31e6ecdd9ea603a31e3f254e85bd8904"
+    },
+    {
+      "key_id": "cf688b3fd2672365",
+      "role": "build",
+      "ed25519": "76a890cac78f241930f2a21878f1b35a65e1491577500d0b818bc2fa1457b52b",
+      "p256": "04381ce845a7bf9e8d491ab926968eca3008e5b3d0dae29a3fa802b37519222aa7e346313062a663e4136038d8d22fb6c52fbb09e6e29c0e09f52193b2b67bfe78"
+    }
+  ]
+}
