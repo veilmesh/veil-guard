@@ -2,6 +2,11 @@
 
 > **Zero-Trust Web Asset Integrity & Attestation Suite for Modern SPAs and WebAssembly**
 
+[![crates.io](https://img.shields.io/crates/v/veil-guard?color=blue&logo=rust)](https://crates.io/crates/veil-guard)
+[![npm](https://img.shields.io/npm/v/@veilmesh/veil-guard?color=crimson&logo=npm)](https://www.npmjs.com/package/@veilmesh/veil-guard)
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-veil--guard--action-blueviolet?logo=github-actions)](https://github.com/marketplace/actions/veil-guard-sign-audit)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green)](LICENSE-MIT)
+
 `veil-guard` brings iOS/Android App Store-style code signing guarantees to Single Page Applications (SPAs), WebAssembly modules, and privacy-focused web applications — without blockchains, heavy browser extensions, or vendor lock-in.
 
 ---
