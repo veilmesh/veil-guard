@@ -1,0 +1,55 @@
+# Stages @veilmesh/veil-guard-verify (runtime/) on npm from a tag
+# verify-vX.Y.Z, with no token: npm's trusted publishing takes this
+# workflow's OIDC identity (set up once on npmjs.com → the package →
+# Settings → Trusted publishing: GitHub Actions, veilmesh / veil-guard,
+# publish-verify.yml, environment npm, "Allow npm publish" off). The
+# version goes live only when a maintainer approves it with 2FA
+# (npmjs.com → Staged Packages), npm's recommended staged publishing.
+#
+# Runs on the GitHub push-mirror: tag the canonical GitLab repo and the
+# mirror carries the tag across. An existing tag can be published again by
+# hand (Actions → publish-verify → Run workflow).
+
+name: publish-verify
+
+on:
+  push:
+    tags: ['verify-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish, e.g. verify-v0.4.0 (must already exist)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - name: The tag names the package's version
+        working-directory: runtime
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "verify-v$version" != "$TAG" ]; then
+            echo "tag $TAG but runtime/package.json says $version" >&2
+            exit 1
+          fi
+      - run: npm stage publish
+        working-directory: runtime

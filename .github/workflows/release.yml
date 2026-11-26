@@ -13,7 +13,8 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    # v0.2.1, not verify-v0.4.0 (that one is publish-verify.yml).
+    tags: ['v[0-9]*']
   workflow_dispatch:
     inputs:
       tag:
