@@ -1,6 +1,6 @@
 {
   "name": "@veilmesh/veil-guard-verify",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pure JavaScript verification engine for veil-guard protocol (SPEC.md §5, §7, §8, §9)",
   "type": "module",
   "main": "./veilguard-verify.mjs",
