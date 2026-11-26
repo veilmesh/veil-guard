@@ -203,6 +203,23 @@ console.log('\ntampered: a page for a navigation, nothing for a subresource');
   check('the subresource does not re-read the manifest', w.counts.manifest === 2, `manifest fetched ${w.counts.manifest} times`);
 }
 
+console.log('\na tampered page above the streaming threshold: still the page, not a broken stream');
+if (fileOf(v1)('/big.html')) {
+  const injected = (path) => {
+    const bytes = fileOf(v1)(path);
+    if (path === '/big.html') return Buffer.from(String(bytes).replace('<body>', '<body><script src="/beacon.js"></script>'));
+    return bytes;
+  };
+  const w = worker({ manifests: [v1], files: injected });
+  const page = await w.fetchEvent('/big.html', 'document');
+  const body = page.body ? await page.text() : '';
+  check('the large navigation is answered 526', page.status === 526, `got ${page.status}`);
+  check('with the explanation page', body.includes('This page was blocked') && body.includes('/big.html'));
+  check('after one manifest re-read', w.counts.manifest === 2, `manifest fetched ${w.counts.manifest} times`);
+} else {
+  check('the dists carry /big.html for this case', false, 'sign a page above 512 KiB as big.html');
+}
+
 console.log('\na deploy racing the manifest: the HTML is newer than the manifest held');
 {
   const w = worker({ manifests: [v1, v2], files: fileOf(v2) });

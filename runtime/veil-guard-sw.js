@@ -444,7 +444,12 @@ async function handle(request) {
   // compression, which is everywhere. The manifest, meanwhile, already records the
   // decoded length of every asset, is signed, and is known before the request is
   // even made.
-  const isLarge = entry.size > STREAM_THRESHOLD_BYTES;
+  //
+  // A navigation never streams, whatever its size: its HTML must be judged whole
+  // before a byte reaches the page, so that a mismatch can be re-checked against a
+  // fresh manifest and, if it stands, answered with the explanation page. A stream
+  // that fails at its flush leaves a blank or half-drawn page (issue #1003).
+  const isLarge = !isNavigation && entry.size > STREAM_THRESHOLD_BYTES;
   const wasm = isLarge && response.body != null ? await getWasmHasher() : null;
 
   if (wasm) {

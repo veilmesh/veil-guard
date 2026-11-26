@@ -126,6 +126,7 @@ e2e:
         mkdir -p "e2e/nav$v/assets"
         printf 'export const x = 1;\n' > "e2e/nav$v/assets/app.js"
         printf '<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body>build %s</body></html>\n' "$v" > "e2e/nav$v/index.html"
+        { printf '<!doctype html><html><body>'; head -c 614400 /dev/zero | tr '\0' 'a'; printf '</body></html>\n'; } > "e2e/nav$v/big.html"
         "$BIN" sign --dist "e2e/nav$v" --trust-root e2e/trust-root.json \
           --key e2e/keys/alice.key.json --key e2e/keys/bob.key.json --version "$v"
       done

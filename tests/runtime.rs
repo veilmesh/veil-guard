@@ -249,6 +249,16 @@ fn blocked_navigation_gets_a_page_and_a_racing_deploy_recovers() {
         let dist = dir.join(name);
         std::fs::create_dir_all(dist.join("assets")).unwrap();
         std::fs::write(dist.join("assets/app.js"), b"export const x = 1;\n").unwrap();
+        // A page above the worker's streaming threshold (512 KiB): a navigation
+        // must still be judged whole and answered with the page (#1003).
+        std::fs::write(
+            dist.join("big.html"),
+            format!(
+                "<!doctype html><html><body>{}</body></html>\n",
+                "a".repeat(600 * 1024)
+            ),
+        )
+        .unwrap();
         std::fs::write(
             dist.join("index.html"),
             format!("<!doctype html><html><head><script type=\"module\" src=\"/assets/app.js\"></script></head><body>{text}</body></html>\n"),
