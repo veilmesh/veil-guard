@@ -71,7 +71,12 @@ fn build_signed_fixture(name: &str) -> Fixture {
     root.validate().unwrap();
 
     let assets = scan_dist(&dist).unwrap();
-    let version = 1_780_000_000u64;
+    // Signed now: a fixed date ran past `not_after` on 24 Nov 2026 and the
+    // JS verifier rightly called the build EXPIRED.
+    let version = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let manifest = Manifest {
         spec: SPEC_MANIFEST.into(),
         version,
