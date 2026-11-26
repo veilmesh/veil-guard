@@ -22,6 +22,7 @@ import {
 } from './veilguard-verify.mjs';
 import {
   applyRotationChain,
+  blockedResponseParts,
   decideRequest,
   decideResponse,
   decideStreamedBody,
@@ -271,11 +272,41 @@ function broadcast(message) {
 }
 
 // ------------------------------------------------------------------ serving
-function blockedResponse(reason, key) {
+function blockedResponse(reason, key, isNavigation = false) {
   broadcast({ type: 'veil-guard:blocked', reason, subject: key ?? null, ...presentationFor('TAMPERED') });
-  // An opaque error rather than a body: whatever the page expected here, it must
-  // not receive something that could be parsed or executed.
-  return new Response(null, { status: 526, statusText: 'veil-guard integrity failure' });
+  // A subresource gets an opaque error rather than a body: whatever the page
+  // expected here, it must not receive something that could be parsed or executed.
+  // A navigation gets a self-contained page that says what happened — an empty 526
+  // there is a blank screen with no way out (issue #1003).
+  const { status, statusText, headers, body } = blockedResponseParts({ isNavigation, path: key, reason });
+  return new Response(body, { status, statusText, headers });
+}
+
+/// Issue #1003, item 2: the navigated HTML does not match its manifest entry. A
+/// deploy that replaced the page and the manifest moments apart looks exactly like
+/// this to a worker holding the older manifest, so read the manifest again — once,
+/// past every cache (`fetchControl` is `no-store`) — and judge the same bytes against
+/// what it says now. Only a mismatch that survives the fresh manifest is tampering.
+/// Returns the new verdict, or `null` when the fresh manifest changes nothing.
+async function recheckNavigation(request, entry, bytes, response) {
+  await refresh();
+  const again = decideRequest({
+    url: request.url,
+    origin: self.location.origin,
+    destination: request.destination,
+    manifestState: state.manifestState,
+    manifest: state.manifest,
+  });
+  if (again.outcome !== 'CHECK' || again.entry.sha256 === entry.sha256) return null;
+  const verdict = decideResponse({
+    entry: again.entry,
+    status: response.status,
+    redirected: response.redirected,
+    contentType: response.headers.get('content-type'),
+    digestHex: hex(await sha256(bytes)),
+    byteLength: bytes.byteLength,
+  });
+  return { verdict, entry: again.entry };
 }
 
 /**
@@ -366,7 +397,8 @@ async function handle(request) {
   if (decision.outcome === 'PASSTHROUGH') return fetch(request);
   if (decision.outcome === 'BLOCK_NO_MANIFEST') return unavailableResponse(decision.reason);
   if (decision.outcome === 'BLOCK_UNMANIFESTED' || decision.outcome === 'BLOCK_TAMPER') {
-    return blockedResponse(decision.reason, decision.key);
+    const path = decision.key ?? safePathname(request.url);
+    return blockedResponse(decision.reason, path, request.destination === 'document');
   }
 
   const { entry, isNavigation } = decision;
@@ -425,7 +457,7 @@ async function handle(request) {
       redirected: response.redirected,
       contentType: response.headers.get('content-type'),
     });
-    if (head.outcome === 'BLOCK_TAMPER') return blockedResponse(head.reason, entry.path);
+    if (head.outcome === 'BLOCK_TAMPER') return blockedResponse(head.reason, entry.path, isNavigation);
     if (head.outcome === 'NETWORK_FAIL') {
       broadcast({ type: 'veil-guard:network', subject: entry.path, ...presentationFor('NETWORK_FAIL') });
       return response;
@@ -436,7 +468,7 @@ async function handle(request) {
 
   // Buffered path (small responses, unknown length, or Wasm unavailable).
   const bytes = new Uint8Array(await response.clone().arrayBuffer());
-  const verdict = decideResponse({
+  let verdict = decideResponse({
     entry,
     status: response.status,
     redirected: response.redirected,
@@ -445,15 +477,32 @@ async function handle(request) {
     byteLength: bytes.byteLength,
   });
 
-  if (verdict.outcome === 'BLOCK_TAMPER') return blockedResponse(verdict.reason, entry.path);
+  let served = entry;
+  if (verdict.outcome === 'BLOCK_TAMPER' && isNavigation && (verdict.reason === 'hash-mismatch' || verdict.reason === 'size-mismatch')) {
+    const again = await recheckNavigation(request, entry, bytes, response);
+    if (again) {
+      verdict = again.verdict;
+      served = again.entry;
+    }
+  }
+
+  if (verdict.outcome === 'BLOCK_TAMPER') return blockedResponse(verdict.reason, entry.path, isNavigation);
   if (verdict.outcome === 'NETWORK_FAIL') {
     broadcast({ type: 'veil-guard:network', subject: entry.path, ...presentationFor('NETWORK_FAIL') });
     return response;
   }
   if (verdict.outcome === 'PASSTHROUGH') return response;
 
-  await cache.put(cacheKey, response.clone());
+  await cache.put(served === entry ? cacheKey : await cacheKeyFor(served), response.clone());
   return response;
+}
+
+function safePathname(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return '/';
+  }
 }
 
 // ------------------------------------------------------------------ lifecycle

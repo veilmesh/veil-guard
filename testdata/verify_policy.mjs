@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   applyRotationChain,
+  blockedResponseParts,
   decideRequest,
   decideResponse,
   decideStreamedBody,
@@ -391,6 +392,21 @@ check(
     byteLength: 900000,
   }).outcome === 'SERVE_VERIFIED',
 );
+
+console.log('\nblocked responses (issue #1003)');
+{
+  const sub = blockedResponseParts({ isNavigation: false, path: '/assets/app.js', reason: 'hash-mismatch' });
+  check('a subresource gets an empty 526', sub.status === 526 && sub.body === null);
+  const nav = blockedResponseParts({ isNavigation: true, path: '/<script>alert(1)</script>"', reason: 'hash-mismatch' });
+  check('a navigation gets a 526 page', nav.status === 526 && typeof nav.body === 'string' && nav.headers['content-type'].startsWith('text/html'));
+  check('the page has no script, even from a hostile path', !/<script/i.test(nav.body), 'the path is escaped');
+  check('the path is shown escaped', nav.body.includes('&lt;script&gt;alert(1)&lt;/script&gt;&quot;'));
+  check('the page says the tamper text', nav.body.includes(presentationFor('TAMPERED').message));
+  check('its CSP allows no script', /default-src 'none'/.test(nav.headers['content-security-policy']) && !/script-src/.test(nav.headers['content-security-policy']));
+  const unsupported = blockedResponseParts({ isNavigation: true, path: '/', reason: 'manifest-UNSUPPORTED' });
+  check('a manifest-wide failure says its own state', unsupported.body.includes(presentationFor('UNSUPPORTED').message));
+  check('and names the reason', unsupported.body.includes('manifest-UNSUPPORTED'));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

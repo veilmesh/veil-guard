@@ -203,3 +203,82 @@ fn bundled_worker_evaluates_and_registers_handlers() {
     assert!(ok, "the bundled worker did not evaluate cleanly:\n{out}");
     assert!(out.contains("activate, fetch, install, message"), "{out}");
 }
+
+/// Issue #1003: a blocked navigation gets an explanation page, a blocked
+/// subresource an empty 526, and a page newer than the manifest the worker holds
+/// is served after one re-read of the manifest. Driven through the real worker
+/// with two builds signed by the CLI.
+#[test]
+fn blocked_navigation_gets_a_page_and_a_racing_deploy_recovers() {
+    if !node_available() {
+        eprintln!("skipping: node not on PATH");
+        return;
+    }
+    let bin = env!("CARGO_BIN_EXE_veil-guard");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin).args(args).output().expect("binary runs");
+        assert!(
+            out.status.success(),
+            "`veil-guard {}` failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let dir = std::env::temp_dir().join(format!("vg-nav-1003-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |p: &str| dir.join(p).to_str().unwrap().to_owned();
+
+    let keys = path("keys");
+    for n in ["a", "b"] {
+        run(&["keygen", "--out-dir", &keys, "--name", n]);
+    }
+    let root = path("trust-root.json");
+    run(&[
+        "trust-root",
+        "--key",
+        &path("keys/a.pub.json"),
+        "--key",
+        &path("keys/b.pub.json"),
+        "--threshold",
+        "2",
+        "--out",
+        &root,
+    ]);
+    for (name, version, text) in [("v1", "1", "first"), ("v2", "2", "second")] {
+        let dist = dir.join(name);
+        std::fs::create_dir_all(dist.join("assets")).unwrap();
+        std::fs::write(dist.join("assets/app.js"), b"export const x = 1;\n").unwrap();
+        std::fs::write(
+            dist.join("index.html"),
+            format!("<!doctype html><html><head><script type=\"module\" src=\"/assets/app.js\"></script></head><body>{text}</body></html>\n"),
+        )
+        .unwrap();
+        run(&[
+            "sign",
+            "--dist",
+            dist.to_str().unwrap(),
+            "--trust-root",
+            &root,
+            "--key",
+            &path("keys/a.key.json"),
+            "--key",
+            &path("keys/b.key.json"),
+            "--version",
+            version,
+        ]);
+    }
+    run(&["runtime", "--trust-root", &root, "--out", &path("public")]);
+
+    let (ok, out) = run_node(
+        "testdata/run_sw_navigation.mjs",
+        &[
+            &dir.join("public/veil-guard-sw.js"),
+            &dir.join("v1"),
+            &dir.join("v2"),
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok, "{out}");
+    assert!(out.contains("0 failed"), "{out}");
+}

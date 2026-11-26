@@ -119,6 +119,18 @@ e2e:
       node testdata/verify_manifest.mjs e2e/dist e2e/trust-root.json VALID
       node testdata/run_sw_smoke.mjs e2e/public/veil-guard-sw.js
 
+      # Issue #1003: what a blocked navigation and a blocked subresource are
+      # answered with, and a page newer than the manifest the worker holds. Two
+      # builds signed in order, so the second manifest is the newer one.
+      for v in 1 2; do
+        mkdir -p "e2e/nav$v/assets"
+        printf 'export const x = 1;\n' > "e2e/nav$v/assets/app.js"
+        printf '<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body>build %s</body></html>\n' "$v" > "e2e/nav$v/index.html"
+        "$BIN" sign --dist "e2e/nav$v" --trust-root e2e/trust-root.json \
+          --key e2e/keys/alice.key.json --key e2e/keys/bob.key.json --version "$v"
+      done
+      node testdata/run_sw_navigation.mjs e2e/public/veil-guard-sw.js e2e/nav1 e2e/nav2
+
       # And the whole thing is worthless if a modified asset still passes.
       printf 'export const x = 2;\n' > e2e/dist/assets/app.js
       if "$BIN" verify --dist e2e/dist --trust-root e2e/trust-root.json; then

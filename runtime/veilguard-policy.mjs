@@ -46,6 +46,89 @@ export function presentationFor(state) {
   }
 }
 
+// ------------------------------------------------------------------ blocked page
+/// The status a blocked request is answered with. Not a standard code: 526 is what
+/// a proxy says when it cannot validate an origin, which is close enough, and it
+/// stays distinguishable from anything the origin itself sends.
+export const BLOCKED_STATUS = 526;
+
+const escapeHtml = (text) =>
+  String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/// What a blocked request is answered with (issue #1003).
+///
+/// A subresource gets an opaque, empty error: whatever the page expected there, it
+/// must not receive something that could be parsed or executed. A navigation is
+/// different — an empty 526 leaves the person looking at a blank white page with no
+/// way to tell a tampered site from a broken one, and no way out. So a navigation
+/// gets a page of its own: self-contained (inline CSS, no script, nothing it loads),
+/// the failure in plain words, the path and the reason, and what to do next.
+///
+/// `path` and `reason` are attacker-influenced — the path comes from the URL — so
+/// both are escaped, and the page's CSP forbids scripts and every subresource even
+/// if escaping were ever wrong.
+export function blockedResponseParts({ isNavigation, path, reason }) {
+  const statusText = 'veil-guard integrity failure';
+  if (!isNavigation) {
+    return { status: BLOCKED_STATUS, statusText, headers: {}, body: null };
+  }
+  // A manifest that failed as a whole names its own state (`manifest-ROLLBACK`, …);
+  // anything else is a file that did not match what was signed.
+  const state = typeof reason === 'string' && reason.startsWith('manifest-') ? reason.slice('manifest-'.length) : 'TAMPERED';
+  const { message } = presentationFor(state);
+  return {
+    status: BLOCKED_STATUS,
+    statusText,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+    },
+    body: blockedPage({ path, reason, message }),
+  };
+}
+
+/// The page itself. Plain words first, the details for a report after them.
+export function blockedPage({ path, reason, message }) {
+  const shown = escapeHtml(path || '/');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>This page was blocked</title>
+<style>
+body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:#f6f6f7;color:#1d1d1f}
+main{max-width:34rem;margin:12vh auto;padding:2rem;background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+h1{font-size:1.4rem;margin:0 0 .75rem}
+p{margin:.5rem 0}
+dl{margin:1.25rem 0;padding:.75rem 1rem;background:#f2f2f4;border-radius:8px;font-size:.9rem}
+dt{color:#6e6e73}
+dd{margin:0 0 .5rem;font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+a{color:#0066cc}
+@media (prefers-color-scheme:dark){body{background:#111;color:#f2f2f2}main{background:#1c1c1e;box-shadow:none}dl{background:#2c2c2e}dt{color:#a1a1a6}a{color:#4da3ff}}
+</style>
+</head>
+<body>
+<main>
+<h1>This page was blocked</h1>
+<p>${escapeHtml(message)}</p>
+<p>Your browser checked this page against the signed list of files this site published, and it did not match. It was stopped before anything on it could run. This can be an attack, or a network or proxy changing the page on its way to you.</p>
+<p><a href="${shown}">Try again</a>. If it keeps happening, tell the people who run this site, and quote the details below.</p>
+<dl>
+<dt>Page</dt><dd>${shown}</dd>
+<dt>Reason</dt><dd>${escapeHtml(reason || 'unknown')}</dd>
+<dt>Checked by</dt><dd>veil-guard</dd>
+</dl>
+</main>
+</body>
+</html>
+`;
+}
+
 // ------------------------------------------------------------------ scope
 /// SPEC §8.3. A path is in scope when it matches an `include` prefix and no
 /// `exclude` prefix. Prefixes are matched on path segments, so `/api` does not

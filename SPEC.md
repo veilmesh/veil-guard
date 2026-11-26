@@ -617,6 +617,46 @@ Cache Storage is keyed by `sha256`, not by URL. Eviction is normal browser behav
 under storage pressure and **MUST** be handled as "re-fetch and re-verify", never as
 tampering.
 
+### 8.4 What a blocked request is answered with
+
+A blocked subresource **MUST** be answered with an empty body (status `526`): whatever
+the page expected there, it must not receive something that could be parsed or
+executed.
+
+A blocked navigation (`destination` `document`) **SHOULD** be answered with a page of
+its own, also status `526`: self-contained (inline CSS only, no script, no
+subresource, a CSP of `default-src 'none'`), saying in plain words what failed, the
+path and the reason, and what to do next. An empty `526` on a navigation is a blank
+screen with no way to tell a tampered site from a broken one. The path comes from the
+URL and **MUST** be escaped.
+
+Before a navigation is blocked for its own HTML not matching (`sha256` or `size`), the
+worker **SHOULD** read the manifest again once, past every cache, and judge the same
+bytes against it: a deploy that replaced the page and the manifest moments apart looks
+exactly like tampering to a worker holding the older manifest. Only a mismatch that
+survives the fresh manifest is `BLOCK_TAMPER`. (A body large enough to be verified as
+a stream, §8.3, is judged at its end and is not re-checked.)
+
+### 8.5 Operators: nothing may rewrite the HTML in transit
+
+The manifest signs the HTML byte for byte. Anything between the origin and the browser
+that changes those bytes makes every page look tampered, and the worker blocks it —
+correctly, since it cannot tell a CDN feature from an attack. Features known to do
+this, and which **MUST** be off for a site behind veil-guard:
+
+- analytics or monitoring beacons injected into the page (Cloudflare Web Analytics
+  automatic setup / RUM, and similar "zero-code" setups of other CDNs);
+- script rewriters and loaders (Cloudflare Rocket Loader);
+- email address obfuscation and other content scrapers' protections;
+- HTML auto-minification, and any "optimisation" that re-serializes markup.
+
+Operators **SHOULD** send `Cache-Control: no-transform` on HTML responses: RFC 9111
+§5.2.2.6 forbids intermediaries from transforming such a response, and several CDNs
+honour it for their own rewriting features. It is a safeguard, not a substitute for
+turning the features off — a CDN can be configured to ignore it. Such features can
+also be enabled for part of the audience only (by country or by sampling), so a site
+that verifies cleanly from one vantage point may be blocked from another.
+
 ---
 
 ## 9. Rotation and revocation
