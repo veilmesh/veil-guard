@@ -10,7 +10,9 @@
   },
   "files": [
     "veilguard-verify.mjs",
-    "veilguard-policy.mjs"
+    "veilguard-policy.mjs",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
   ],
   "keywords": [
     "veil-guard",
